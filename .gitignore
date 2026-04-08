@@ -1,0 +1,20 @@
+# Build artifacts
+*.o
+*.so
+*.a
+app
+Enclave/Enclave_t.c
+Enclave/Enclave_t.h
+App/Enclave_u.c
+App/Enclave_u.h
+enclave.signed.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
