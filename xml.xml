@@ -1,0 +1,107 @@
+<mxfile host="app.diagrams.net" modified="2024-03-21T00:00:00.000Z" agent="Gemini" version="21.0.0" type="device">
+  <diagram id="architectura-sgx" name="Arquitetura Data Lake Confidencial">
+    <mxGraphModel dx="1100" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="700" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Zona dos Participantes -->
+        <mxCell id="zone_clients" value="Participantes do Consórcio (Hospitais)" style="swimlane;whiteSpace=wrap;html=1;dashed=1;fontStyle=1;startSize=30;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="230" height="380" as="geometry" />
+        </mxCell>
+        <mxCell id="client_data" value="Dados Médicos" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="zone_clients">
+          <mxGeometry x="75" y="50" width="80" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="client_crypto" value="Cifragem &amp; mTLS&#xa;(AES-256-GCM)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="zone_clients">
+          <mxGeometry x="55" y="150" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="client_attestation" value="Verificador DCAP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_clients">
+          <mxGeometry x="55" y="300" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Seta interna: Dados -> Cifragem -->
+        <mxCell id="flow_data_to_crypto" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="zone_clients" source="client_data" target="client_crypto">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Zona do Cloud Provider -->
+        <mxCell id="zone_cloud" value="Cloud Provider (Não Confiável)" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#333333;strokeColor=#666666;startSize=30;" vertex="1" parent="1">
+          <mxGeometry x="370" y="30" width="480" height="440" as="geometry" />
+        </mxCell>
+
+        <!-- Enclave -->
+        <mxCell id="enclave" value="Intel SGX Enclave (Trusted)" style="swimlane;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;startSize=25;" vertex="1" parent="zone_cloud">
+          <mxGeometry x="200" y="50" width="250" height="350" as="geometry" />
+        </mxCell>
+        <mxCell id="keystore" value="Keystore Interno&#xa;(Sessões + TTL)" style="shape=process;whiteSpace=wrap;html=1;backgroundOutline=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="enclave">
+          <mxGeometry x="55" y="40" width="140" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="duckdb" value="Motor SQL&#xa;(DuckDB)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="enclave">
+          <mxGeometry x="55" y="130" width="140" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="privacy_filter" value="Filtro K-Anonymity&#xa;(Threshold K≥5)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="enclave">
+          <mxGeometry x="55" y="220" width="140" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Seta interna: DuckDB -> Filtro -->
+        <mxCell id="flow_duckdb_to_filter" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="enclave" source="duckdb" target="privacy_filter">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Storage (fora do enclave, dentro do cloud) -->
+        <mxCell id="storage" value="Armazenamento&#xa;Persistente&#xa;(Sealed Data)" style="shape=datastore;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#333333;strokeColor=#666666;" vertex="1" parent="zone_cloud">
+          <mxGeometry x="40" y="200" width="110" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Seta: Storage <-> Enclave (seal/unseal) -->
+        <mxCell id="flow_seal" value="Seal / Unseal" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;strokeColor=#999999;" edge="1" parent="zone_cloud" source="storage" target="enclave">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 1. Atestação + ECDH (bidirecional) -->
+        <mxCell id="flow_attest" value="1. Atestação DCAP + ECDH" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;strokeWidth=2;strokeColor=#0050ef;startArrow=classic;startFill=1;" edge="1" parent="1" source="client_attestation" target="enclave">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="330" y="410" />
+              <mxPoint x="330" y="380" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- 2. Ingestão Cifrada -->
+        <mxCell id="flow_ingest" value="2. Ingestão Cifrada" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;" edge="1" parent="1" source="client_crypto" target="storage">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="330" y="240" />
+              <mxPoint x="330" y="280" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- 3. Query -->
+        <mxCell id="flow_query" value="3. Query (TLS)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.3;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#b85450;" edge="1" parent="1" source="client_crypto" target="enclave">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="320" y="240" />
+              <mxPoint x="320" y="185" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- 4. Resultados Autenticados (retorno) -->
+        <mxCell id="flow_results" value="4. Resultados&#xa;(HMAC-SHA256)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.85;exitDx=0;exitDy=0;strokeWidth=2;strokeColor=#b85450;dashed=1;" edge="1" parent="1" source="enclave" target="client_crypto">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="340" y="378" />
+              <mxPoint x="340" y="270" />
+              <mxPoint x="270" y="270" />
+              <mxPoint x="270" y="230" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
