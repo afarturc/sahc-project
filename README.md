@@ -1,129 +1,115 @@
-# SAHC - Secure Aggregation for Healthcare Consortiums
+# SAHC — Secure Aggregation for Healthcare Consortiums
 
-A secure data lake prototype using **Intel SGX** for confidential multi-hospital patient data analysis. Multiple hospitals encrypt their patient records and submit them to an SGX enclave, which decrypts and runs aggregate queries (AVG, MIN, MAX, COUNT) without exposing individual records.
+Data lake confidencial baseado em **Intel SGX** para análise colaborativa de dados de pacientes entre múltiplos hospitais. Os contribuidores cifram os registos com uma session key negociada por atestação, o enclave desencripta em memória protegida e executa queries agregadas (AVG, MIN, MAX, COUNT) sem expor registos individuais ao host, ao OS ou ao operador cloud.
 
-Built as a university project for the **Security and Trusted Hardware Applications** course at FCUP (University of Porto).
+Desenvolvido no âmbito da disciplina **Segurança e Aplicações de Hardware Confiável (SAHC)**, FCUP — Universidade do Porto, 2025/26.
 
-## Motivation
+## Estado Atual
 
-Healthcare data lakes increasingly handle sensitive patient data across multiple institutions. This project explores how trusted hardware (Intel SGX) can enforce confidentiality and integrity guarantees that survive even a compromised cloud provider, enabling collaborative analysis without exposing individual records.
+- **Milestone 1 (Fase 1)**: protótipo funcional entregue. Tag `v1.0-milestone1` preserva este estado.
+- **Milestone 2 (Fases 2–4)**: em desenvolvimento. Ver [`PLANO_FINAL.md`](PLANO_FINAL.md) para o plano completo (scope, decisões arquiteturais, sequenciamento de trabalho, infraestrutura Azure).
 
-## Features
+Os artefactos da Milestone 1 (relatório, slides, guião de apresentação, diagramas drawio) estão em [`docs/milestone1/`](docs/milestone1/).
 
-- **SGX enclave** for secure data processing in protected memory
-- **AES-128-GCM encryption** per hospital using dynamically negotiated session keys
-- **DCAP remote attestation** (simulated) with nonce verification, MRENCLAVE/MRSIGNER checks, and Quoting Enclave signature
-- **Aggregate queries**: AVG, MIN, MAX, COUNT with filtering by diagnosis
-- **Multi-hospital support**: 3 hospitals loading data from CSV files
-- Interactive menu interface
+## Arquitetura (Fase 1)
 
-## Architecture
-
-The codebase follows the SGX **split-trust model**:
+Modelo **split-trust** clássico do SGX: host não confiável trata de I/O, cifra e networking; enclave mantém session keys e registos desencriptados em memória protegida.
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                  Untrusted (App/)                     │
-│                                                      │
-│  CSV Loading ─► AES-128-GCM Encryption ─► ECALLs ───┤──►┐
-│                                                      │   │
-│  Query Interface ◄── Results ◄── ECALLs ◄────────────┤──►│
-│                                                      │   │
-│  Attestation: nonce gen, MRENCLAVE/MRSIGNER verify   │   │
-└──────────────────────────────────────────────────────┘   │
-                                                           │
-┌──────────────────────────────────────────────────────┐   │
-│                  Trusted (Enclave/)                   │◄──┘
-│                                                      │
-│  Session keys + decrypted records in protected memory│
-│  AES-GCM decryption (sgx_tcrypto)                    │
-│  ECDSA-signed attestation reports                    │
-│  Aggregate query execution                           │
-└──────────────────────────────────────────────────────┘
+┌─────────────────────────────┐      ┌──────────────────────────────┐
+│   Untrusted (App/)          │      │   Trusted (Enclave/)         │
+│                             │      │                              │
+│  CSV → AES-128-GCM encrypt  │─────▶│  sgx_rijndael128GCM_decrypt  │
+│  nonce gen, MRENCLAVE check │◀─────│  ECDSA-signed quote          │
+│  query UI                   │      │  session keys + records      │
+└─────────────────────────────┘      │  aggregate engine            │
+                                     └──────────────────────────────┘
 ```
 
-**Data flow**: Hospital CSV → encrypt with session key → ECALL → enclave decrypts → stores internally → queries return only aggregates.
+### ECALLs implementados
 
-### ECALL Interface
+| ECALL | Descrição |
+|-------|-----------|
+| `ecall_generate_report` | Quote DCAP simulado (MRENCLAVE, MRSIGNER, nonce, ECDSA) |
+| `ecall_finish_key_exchange` | Gera session key AES-128 aleatória por hospital |
+| `ecall_upload_data` | Recebe registos cifrados, desencripta e armazena |
+| `ecall_run_query` | Agregação (AVG/MIN/MAX/COUNT) com filtro por diagnóstico |
 
-| ECALL | Description |
-|-------|-------------|
-| `ecall_generate_report` | Generates a signed DCAP quote with MRENCLAVE, MRSIGNER, and nonce |
-| `ecall_finish_key_exchange` | Generates a random AES-128 session key for a hospital |
-| `ecall_upload_data` | Receives encrypted patient records, decrypts and stores internally |
-| `ecall_run_query` | Runs an aggregate query with optional diagnosis filter |
-
-## Project Structure
+## Estrutura do Repositório
 
 ```
-App/                    # Untrusted side (host application)
-  app_main.cpp          # main(), menu loop, enclave init/teardown
-  csv_loader.cpp/h      # CSV parsing and loading
-  crypto.cpp/h          # AES-128-GCM encryption via OpenSSL
-  attestation.cpp/h     # DCAP remote attestation orchestration
-  upload.cpp/h          # Encrypted data upload to enclave
-  query.cpp/h           # Interactive aggregate query interface
-  helpers.cpp/h         # Display/translation utilities
-  hospital_state.h      # HospitalState struct, EXPECTED_MRENCLAVE
-Enclave/                # Trusted side (SGX enclave)
-  Enclave.cpp           # Attestation, key exchange, decryption, queries
-  Enclave.edl           # ECALL/OCALL interface definition
-  Enclave.config.xml    # Enclave memory/thread configuration
-  Enclave_private.pem   # Enclave signing key
+App/                    # Host (untrusted)
+  app_main.cpp          # menu, init/teardown do enclave
+  csv_loader.cpp/h      # parsing CSV
+  crypto.cpp/h          # AES-128-GCM via OpenSSL
+  attestation.cpp/h     # orquestração DCAP simulado
+  upload.cpp/h          # upload cifrado
+  query.cpp/h           # UI de queries
+  helpers.cpp/h         # utilitários
+  hospital_state.h      # HospitalState, EXPECTED_MRENCLAVE
+Enclave/                # Enclave (trusted)
+  Enclave.cpp           # atestação, KEX, decrypt, queries
+  Enclave.edl           # interface ECALL/OCALL
+  Enclave.config.xml    # memória e threads
+  Enclave_private.pem   # chave de assinatura
 Include/
-  types.h               # Shared data structures (PatientRecord, DCAPQuote, etc.)
-data/                   # Hospital CSV sample datasets
+  types.h               # estruturas partilhadas
+data/                   # CSVs de exemplo por hospital
+docs/
+  milestone1/           # relatório, slides, guião, secção do protótipo
+  diagrams/             # diagramas drawio (arquitetura alvo + POC)
+  refs/                 # papers (SgxPectre, Foreshadow)
+PLANO_FINAL.md          # plano da Milestone 2 (fonte de verdade)
 ```
 
-## Prerequisites
+## Pré-requisitos
 
-- Linux (developed on Debian)
-- [Intel SGX SDK for Linux](https://github.com/intel/linux-sgx) installed at `/opt/intel/sgxsdk`
-- OpenSSL development libraries (`libssl-dev`)
-- GNU Make, GCC/G++
+- Linux (testado em Debian)
+- [Intel SGX SDK for Linux](https://github.com/intel/linux-sgx) em `/opt/intel/sgxsdk`
+- OpenSSL (`libssl-dev`)
+- GNU Make, g++
 
 ## Build & Run
 
 ```bash
-# Source the SGX SDK environment
 source /opt/intel/sgxsdk/environment
-
-# Build
 make
-
-# Run
 ./app
-
-# Clean build artifacts
-make clean
 ```
 
-The build runs in **simulation mode** (`SGX_MODE=SIM`) — no SGX hardware required.
+Compila em modo simulação (`SGX_MODE=SIM`) — não requer hardware SGX.
 
-## Data Format
+Para regressar ao protótipo da Milestone 1:
 
-Hospital CSV files follow this format:
+```bash
+git checkout v1.0-milestone1
+```
+
+## Formato dos Dados
 
 ```csv
 patient_id,age,temperature,blood_sugar,diagnosis
 1001,45,36.5,95.0,0
 ```
 
-Diagnosis codes: `0` = Healthy, `1` = Diabetes, `2` = Hypertension, `3` = Infection
+Códigos de diagnóstico: `0` = saudável, `1` = diabetes, `2` = hipertensão, `3` = infeção.
 
-## Current Limitations
+## Limitações Conhecidas (Fase 1)
 
-- **MRENCLAVE is hardcoded** — not computed from the actual enclave binary
-- **Simplified key exchange** — enclave generates the session key unilaterally (not proper ECDH)
-- **In-memory only** — data is lost on enclave restart
-- **Single-process** — no client/server separation
+- MRENCLAVE hardcoded, não computado a partir do binário do enclave
+- KEX unilateral: enclave gera a session key e devolve-a em claro (sem ECDH mútuo)
+- Dados apenas em memória, sem sealing nem persistência
+- Processo único, sem separação cliente/servidor
+- Sem k-anonymity nos resultados
 
-## Technology Stack
+Todas estas limitações estão endereçadas no plano da Milestone 2.
 
-| Component | Technology |
-|-----------|-----------|
-| Language | C/C++ |
-| Trusted crypto | SGX tcrypto (`sgx_rijndael128GCM_decrypt`, `sgx_ecdsa_sign`) |
-| Untrusted crypto | OpenSSL (AES-128-GCM) |
-| Attestation | Intel DCAP (simulated) |
-| Build | GNU Make |
+## Stack
+
+| Componente | Tecnologia |
+|------------|------------|
+| Linguagem | C/C++ |
+| Crypto confiável | `sgx_tcrypto` (rijndael128GCM, ecdsa) |
+| Crypto não confiável | OpenSSL (AES-128-GCM) |
+| Atestação | Intel DCAP (simulada na Fase 1) |
+| Build | GNU Make, `sgx_edger8r` |
