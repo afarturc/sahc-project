@@ -14,17 +14,27 @@ else
     Urts_Library_Name := sgx_urts
 endif
 
-# --- App (untrusted) ---
-App_C_Flags := $(SGX_COMMON_FLAGS) -fPIC -Wno-attributes \
-    -I. -IApp -IInclude \
-    -I$(SGX_SDK)/include -I/usr/include/openssl
+# --- Common flags for untrusted side (Server, Client, Common) ---
+Untrusted_C_Flags := $(SGX_COMMON_FLAGS) -fPIC -Wall -Wno-attributes \
+    -IInclude -ICommon \
+    -I$(SGX_SDK)/include
 
-App_Link_Flags := -L$(SGX_LIBRARY_PATH) \
-    -l$(Urts_Library_Name) -lpthread -lssl -lcrypto
+# --- Server (links the enclave) ---
+Server_C_Flags := $(Untrusted_C_Flags) -I.
+Server_Link_Flags := -L$(SGX_LIBRARY_PATH) \
+    -l$(Urts_Library_Name) -lpthread
 
-App_Cpp_Files := App/app_main.cpp App/csv_loader.cpp App/crypto.cpp \
-    App/helpers.cpp App/attestation.cpp App/upload.cpp App/query.cpp
-App_Cpp_Objects := $(App_Cpp_Files:.cpp=.o)
+Server_Cpp_Files := Server/server_main.cpp \
+    Common/framing.cpp Common/tcp_util.cpp
+Server_Cpp_Objects := $(Server_Cpp_Files:.cpp=.o)
+
+# --- Client (no enclave, pure TCP + crypto later) ---
+Client_C_Flags := $(Untrusted_C_Flags)
+Client_Link_Flags := -lpthread
+
+Client_Cpp_Files := Client/client_main.cpp \
+    Common/framing.cpp Common/tcp_util.cpp
+Client_Cpp_Objects := $(Client_Cpp_Files:.cpp=.o)
 
 # --- Enclave (trusted) ---
 Enclave_C_Flags := $(SGX_COMMON_FLAGS) -nostdinc -fvisibility=hidden \
@@ -43,11 +53,17 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs \
     -Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
     -Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
-.PHONY: all clean
+.PHONY: all clean enclave sgx_server sgx_client
 
-all: app
+all: sgx_server sgx_client enclave
 
-# Gerar os ficheiros _t e _u a partir do EDL
+enclave: enclave.signed.so
+
+sgx_server: sgx_server_bin
+
+sgx_client: sgx_client_bin
+
+# --- EDL-generated wrappers ---
 Enclave/Enclave_t.c: Enclave/Enclave.edl
 	$(SGX_SDK)/bin/x64/sgx_edger8r --trusted Enclave/Enclave.edl \
 		--search-path $(SGX_SDK)/include \
@@ -57,12 +73,12 @@ Enclave_u.c: Enclave/Enclave.edl
 	$(SGX_SDK)/bin/x64/sgx_edger8r --untrusted Enclave/Enclave.edl \
 		--search-path $(SGX_SDK)/include
 
-# Compilar o enclave
+# --- Enclave build ---
 Enclave/Enclave_t.o: Enclave/Enclave_t.c
-	gcc $(Enclave_C_Flags) -c Enclave/Enclave_t.c -o Enclave/Enclave_t.o
+	gcc $(Enclave_C_Flags) -c $< -o $@
 
 Enclave/Enclave.o: Enclave/Enclave.cpp Enclave/Enclave_t.c
-	g++ $(Enclave_C_Flags) -IEnclave -c Enclave/Enclave.cpp -o Enclave/Enclave.o
+	g++ $(Enclave_C_Flags) -IEnclave -c Enclave/Enclave.cpp -o $@
 
 enclave.so: Enclave/Enclave.o Enclave/Enclave_t.o
 	g++ Enclave/Enclave.o Enclave/Enclave_t.o -o enclave.so -shared \
@@ -73,15 +89,27 @@ enclave.signed.so: enclave.so
 		-enclave enclave.so -out enclave.signed.so \
 		-config Enclave/Enclave.config.xml
 
-# Compilar a app
+# --- Untrusted compile rules ---
 Enclave_u.o: Enclave_u.c
-	gcc $(App_C_Flags) -c Enclave_u.c -o Enclave_u.o
+	gcc $(Server_C_Flags) -c $< -o $@
 
-App/%.o: App/%.cpp
-	g++ $(App_C_Flags) -c $< -o $@
+Server/%.o: Server/%.cpp Enclave_u.c
+	g++ $(Server_C_Flags) -c $< -o $@
 
-app: Enclave_u.o $(App_Cpp_Objects) enclave.signed.so
-	g++ $(App_Cpp_Objects) Enclave_u.o -o app $(App_Link_Flags)
+Client/%.o: Client/%.cpp
+	g++ $(Client_C_Flags) -c $< -o $@
+
+Common/%.o: Common/%.cpp
+	g++ $(Untrusted_C_Flags) -c $< -o $@
+
+# --- Final binaries ---
+sgx_server_bin: $(Server_Cpp_Objects) Enclave_u.o enclave.signed.so
+	g++ $(Server_Cpp_Objects) Enclave_u.o -o sgx_server $(Server_Link_Flags)
+
+sgx_client_bin: $(Client_Cpp_Objects)
+	g++ $(Client_Cpp_Objects) -o sgx_client $(Client_Link_Flags)
 
 clean:
-	rm -f App/*.o Enclave/*.o *.o *.so app Enclave/Enclave_t.* Enclave_u.*
+	rm -f Server/*.o Client/*.o Common/*.o Enclave/*.o *.o *.so \
+		sgx_server sgx_client \
+		Enclave/Enclave_t.* Enclave_u.*

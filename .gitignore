@@ -3,10 +3,10 @@
 *.so
 *.a
 app
+sgx_server
+sgx_client
 Enclave/Enclave_t.c
 Enclave/Enclave_t.h
-App/Enclave_u.c
-App/Enclave_u.h
 # SDK-generated stubs (if emitted into project root)
 /Enclave_u.c
 /Enclave_u.h
