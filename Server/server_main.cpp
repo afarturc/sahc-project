@@ -4,6 +4,7 @@
 #include "framing.h"
 #include "tcp_util.h"
 #include "protocol.h"
+#include "types.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -33,34 +34,122 @@ static int init_enclave(sgx_enclave_id_t* eid_out)
     return 0;
 }
 
-static void handle_client(int conn_fd)
+static void send_error(int fd, uint16_t code)
+{
+    uint8_t err[2] = { (uint8_t)(code >> 8), (uint8_t)code };
+    frame_send(fd, MSG_ERROR, err, sizeof(err));
+}
+
+static inline void put_u16_le(uint8_t* p, uint16_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+}
+
+static int handle_hello(int fd, const uint8_t* payload, uint32_t len)
+{
+    printf("Server: HELLO (%u bytes): \"%.*s\"\n",
+           len, (int)len, (const char*)payload);
+    const char* reply = "hello from sahc server";
+    return frame_send(fd, MSG_HELLO_ACK, (const uint8_t*)reply,
+                      (uint32_t)strlen(reply));
+}
+
+static int handle_attest_req(sgx_enclave_id_t eid, int fd,
+                             const uint8_t* payload, uint32_t len)
+{
+    if (len < 1) { send_error(fd, E_INVALID_STATE); return -1; }
+    uint8_t id_len = payload[0];
+    uint32_t expected = 1u + id_len + PROTO_NONCE_SIZE
+                      + PROTO_ECDH_PUB_SIZE + PROTO_SIG_SIZE;
+    if (id_len == 0 || id_len > 63 || len != expected) {
+        fprintf(stderr, "Server: ATTEST_REQ malformed (len=%u, id_len=%u)\n",
+                len, id_len);
+        send_error(fd, E_INVALID_STATE);
+        return -1;
+    }
+
+    const uint8_t* party_id         = payload + 1;
+    const uint8_t* nonce            = party_id + id_len;
+    const uint8_t* client_ecdh_pub  = nonce + PROTO_NONCE_SIZE;
+    (void)client_ecdh_pub;  // signature verified at Passo 4b
+    (void)(nonce + PROTO_NONCE_SIZE + PROTO_ECDH_PUB_SIZE);  // signature
+
+    printf("Server: ATTEST_REQ party=\"%.*s\"\n", (int)id_len, party_id);
+
+    uint8_t  mrenclave[32];
+    uint8_t  mrsigner[32];
+    uint16_t isv_prod_id = 0;
+    uint16_t isv_svn     = 0;
+    uint8_t  user_data[USER_DATA_SIZE];
+    uint8_t  signature[QUOTE_SIGNATURE_SIZE];
+    uint8_t  qe_identity[32];
+
+    int ret_status = 0;
+    sgx_status_t s = ecall_generate_report(eid, &ret_status,
+                                           (uint8_t*)nonce,
+                                           mrenclave, mrsigner,
+                                           &isv_prod_id, &isv_svn,
+                                           user_data,
+                                           signature, qe_identity);
+    if (s != SGX_SUCCESS || ret_status != 0) {
+        fprintf(stderr, "Server: ecall_generate_report failed (s=0x%x rc=%d)\n",
+                s, ret_status);
+        send_error(fd, E_INTERNAL);
+        return -1;
+    }
+
+    uint8_t resp[PROTO_ATTEST_RESP_SIZE];
+    uint8_t* p = resp;
+    memcpy(p, mrenclave,    32); p += 32;
+    memcpy(p, mrsigner,     32); p += 32;
+    put_u16_le(p, isv_prod_id);  p += 2;
+    put_u16_le(p, isv_svn);      p += 2;
+    memcpy(p, user_data,    32); p += 32;
+    memcpy(p, signature,    64); p += 64;
+    memcpy(p, qe_identity,  32); p += 32;
+    // enclave_ecdh_pub placeholder — real key kicks in at Passo 4b.
+    memset(p, 0, PROTO_ECDH_PUB_SIZE);
+
+    printf("Server: sending ATTEST_RESP (%u bytes)\n", PROTO_ATTEST_RESP_SIZE);
+    return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SIZE);
+}
+
+static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
 {
     uint8_t  buf[RECV_BUF_CAP];
     uint8_t  type = 0;
     uint32_t len  = 0;
 
-    int r = frame_recv(conn_fd, &type, buf, sizeof(buf), &len);
-    if (r != 0) {
-        fprintf(stderr, "Server: frame_recv failed (r=%d)\n", r);
-        return;
-    }
-
-    if (type == MSG_HELLO) {
-        printf("Server: HELLO from client (%u bytes): \"%.*s\"\n",
-               len, (int)len, (const char*)buf);
-
-        const char* reply = "hello from sahc server";
-        uint32_t rlen = (uint32_t)strlen(reply);
-        if (frame_send(conn_fd, MSG_HELLO_ACK, (const uint8_t*)reply, rlen) != 0) {
-            fprintf(stderr, "Server: failed to send HELLO_ACK\n");
-        } else {
-            printf("Server: sent HELLO_ACK\n");
+    while (!g_stop) {
+        int r = frame_recv(conn_fd, &type, buf, sizeof(buf), &len);
+        if (r == 1) {
+            printf("Server: peer closed\n");
+            return;
         }
-    } else {
-        fprintf(stderr, "Server: unexpected msg type 0x%02x\n", type);
-        uint16_t code = E_INVALID_STATE;
-        uint8_t  err[2] = { (uint8_t)(code >> 8), (uint8_t)code };
-        frame_send(conn_fd, MSG_ERROR, err, sizeof(err));
+        if (r != 0) {
+            fprintf(stderr, "Server: frame_recv failed\n");
+            return;
+        }
+
+        int rc = 0;
+        switch (type) {
+        case MSG_HELLO:
+            rc = handle_hello(conn_fd, buf, len);
+            break;
+        case MSG_ATTEST_REQ:
+            rc = handle_attest_req(eid, conn_fd, buf, len);
+            break;
+        case MSG_SESSION_CLOSE:
+            printf("Server: SESSION_CLOSE received\n");
+            return;
+        default:
+            fprintf(stderr, "Server: unexpected msg type 0x%02x\n", type);
+            send_error(conn_fd, E_INVALID_STATE);
+            return;
+        }
+
+        if (rc != 0) return;
     }
 }
 
@@ -90,7 +179,7 @@ int main(int argc, char** argv)
             if (g_stop) break;
             continue;
         }
-        handle_client(conn_fd);
+        serve_connection(eid, conn_fd);
         close(conn_fd);
     }
 

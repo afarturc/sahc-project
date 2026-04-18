@@ -42,4 +42,25 @@
 #define SAHC_DEFAULT_HOST "127.0.0.1"
 #define SAHC_DEFAULT_PORT 7878
 
+// ATTEST_REQ payload:
+//   party_id_len(1) | party_id(party_id_len) | nonce(16)
+//   | client_ecdh_pub(64) | signature(64)
+#define PROTO_NONCE_SIZE   16
+#define PROTO_ECDH_PUB_SIZE 64
+#define PROTO_SIG_SIZE     64
+
+// ATTEST_RESP payload: serialized DCAPQuote followed by enclave_ecdh_pub(64).
+//
+// Serialized DCAPQuote layout (little-endian, native):
+//   mrenclave(32) | mrsigner(32) | isv_prod_id(2) | isv_svn(2)
+//   | user_data(32) | signature(64) | qe_identity(32)
+#define PROTO_QUOTE_MRENCLAVE_SIZE 32
+#define PROTO_QUOTE_MRSIGNER_SIZE  32
+#define PROTO_QUOTE_USER_DATA_SIZE 32
+#define PROTO_QUOTE_SIG_SIZE       64
+#define PROTO_QUOTE_QE_ID_SIZE     32
+#define PROTO_QUOTE_SIZE           (32 + 32 + 2 + 2 + 32 + 64 + 32)
+
+#define PROTO_ATTEST_RESP_SIZE     (PROTO_QUOTE_SIZE + PROTO_ECDH_PUB_SIZE)
+
 #endif
