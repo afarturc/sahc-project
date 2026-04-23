@@ -36,6 +36,16 @@ static inline uint16_t get_u16_le(const uint8_t* p)
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
+// Pinned identity of the enclave the client is willing to talk to.
+// Mirrors SIMULATED_MRENCLAVE in Enclave/Enclave.cpp. On Fase 4 (DCAP real)
+// this literal is replaced by the hash emitted by sgx_sign.
+static const uint8_t EXPECTED_MRENCLAVE[32] = {
+    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
+    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
+    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
+    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89
+};
+
 int main(int argc, char** argv)
 {
     const char* host     = SAHC_DEFAULT_HOST;
@@ -114,6 +124,12 @@ int main(int argc, char** argv)
     print_hex("user_data", user_data, 32);
     print_hex("quote_sig", quote_sig, 64);
     print_hex("qe_ident",  qe_identity, 32);
+
+    if (memcmp(mrenclave, EXPECTED_MRENCLAVE, 32) != 0) {
+        fprintf(stderr, "Client: MRENCLAVE MISMATCH (wrong enclave identity)\n");
+        close(fd); return 1;
+    }
+    printf("Client: MRENCLAVE pin OK\n");
 
     if (memcmp(user_data, nonce, PROTO_NONCE_SIZE) == 0) {
         printf("Client: nonce match OK\n");
