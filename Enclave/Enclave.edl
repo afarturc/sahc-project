@@ -2,8 +2,18 @@ enclave {
     from "sgx_tstdc.edl" import *;
 
     trusted {
+        /* Session lifecycle */
+        public int ecall_open_session(
+            [in, count=id_len] uint8_t* party_id,
+            size_t id_len,
+            [out] uint32_t* handle
+        );
+
+        public int ecall_close_session(uint32_t handle);
+
         /* DCAP: gerar report para o Quoting Enclave */
         public int ecall_generate_report(
+            uint32_t handle,
             [in, count=16] uint8_t* nonce,
             [out, count=32] uint8_t* mrenclave,
             [out, count=32] uint8_t* mrsigner,

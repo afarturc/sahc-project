@@ -56,7 +56,8 @@ static int handle_hello(int fd, const uint8_t* payload, uint32_t len)
 }
 
 static int handle_attest_req(sgx_enclave_id_t eid, int fd,
-                             const uint8_t* payload, uint32_t len)
+                             const uint8_t* payload, uint32_t len,
+                             uint32_t* session_handle)
 {
     if (len < 1) { send_error(fd, E_INVALID_STATE); return -1; }
     uint8_t id_len = payload[0];
@@ -69,6 +70,13 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
         return -1;
     }
 
+    if (*session_handle != 0) {
+        fprintf(stderr, "Server: duplicate ATTEST_REQ on handle %u\n",
+                *session_handle);
+        send_error(fd, E_INVALID_STATE);
+        return -1;
+    }
+
     const uint8_t* party_id         = payload + 1;
     const uint8_t* nonce            = party_id + id_len;
     const uint8_t* client_ecdh_pub  = nonce + PROTO_NONCE_SIZE;
@@ -76,6 +84,18 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
     (void)(nonce + PROTO_NONCE_SIZE + PROTO_ECDH_PUB_SIZE);  // signature
 
     printf("Server: ATTEST_REQ party=\"%.*s\"\n", (int)id_len, party_id);
+
+    int open_rc = 0;
+    sgx_status_t so = ecall_open_session(eid, &open_rc,
+                                         (uint8_t*)party_id, (size_t)id_len,
+                                         session_handle);
+    if (so != SGX_SUCCESS || open_rc != 0 || *session_handle == 0) {
+        fprintf(stderr, "Server: ecall_open_session failed (s=0x%x rc=%d)\n",
+                so, open_rc);
+        send_error(fd, E_INTERNAL);
+        return -1;
+    }
+    printf("Server: session handle=%u\n", *session_handle);
 
     uint8_t  mrenclave[32];
     uint8_t  mrsigner[32];
@@ -87,6 +107,7 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
 
     int ret_status = 0;
     sgx_status_t s = ecall_generate_report(eid, &ret_status,
+                                           *session_handle,
                                            (uint8_t*)nonce,
                                            mrenclave, mrsigner,
                                            &isv_prod_id, &isv_svn,
@@ -115,21 +136,36 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
     return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SIZE);
 }
 
+static void close_session_if_open(sgx_enclave_id_t eid, uint32_t* handle)
+{
+    if (*handle == 0) return;
+    int rc = 0;
+    sgx_status_t s = ecall_close_session(eid, &rc, *handle);
+    if (s != SGX_SUCCESS || rc != 0) {
+        fprintf(stderr, "Server: ecall_close_session(%u) failed (s=0x%x rc=%d)\n",
+                *handle, s, rc);
+    } else {
+        printf("Server: session handle=%u closed\n", *handle);
+    }
+    *handle = 0;
+}
+
 static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
 {
     uint8_t  buf[RECV_BUF_CAP];
     uint8_t  type = 0;
     uint32_t len  = 0;
+    uint32_t session_handle = 0;
 
     while (!g_stop) {
         int r = frame_recv(conn_fd, &type, buf, sizeof(buf), &len);
         if (r == 1) {
             printf("Server: peer closed\n");
-            return;
+            break;
         }
         if (r != 0) {
             fprintf(stderr, "Server: frame_recv failed\n");
-            return;
+            break;
         }
 
         int rc = 0;
@@ -138,19 +174,23 @@ static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
             rc = handle_hello(conn_fd, buf, len);
             break;
         case MSG_ATTEST_REQ:
-            rc = handle_attest_req(eid, conn_fd, buf, len);
+            rc = handle_attest_req(eid, conn_fd, buf, len, &session_handle);
             break;
         case MSG_SESSION_CLOSE:
             printf("Server: SESSION_CLOSE received\n");
+            close_session_if_open(eid, &session_handle);
             return;
         default:
             fprintf(stderr, "Server: unexpected msg type 0x%02x\n", type);
             send_error(conn_fd, E_INVALID_STATE);
+            close_session_if_open(eid, &session_handle);
             return;
         }
 
-        if (rc != 0) return;
+        if (rc != 0) break;
     }
+
+    close_session_if_open(eid, &session_handle);
 }
 
 int main(int argc, char** argv)

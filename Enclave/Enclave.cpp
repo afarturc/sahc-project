@@ -1,8 +1,21 @@
 #include "Enclave_t.h"
 #include "sgx_tcrypto.h"
+#include "sgx_thread.h"
 #include "sgx_trts.h"
 #include "types.h"
 #include <string.h>
+
+#define MAX_SESSIONS      8
+#define SESSION_ID_MAX   63
+
+typedef struct {
+    int     in_use;
+    size_t  id_len;
+    uint8_t party_id[SESSION_ID_MAX + 1];
+} SessionContext;
+
+static SessionContext sessions[MAX_SESSIONS];
+static sgx_thread_mutex_t sessions_mutex = SGX_THREAD_MUTEX_INITIALIZER;
 
 // Identidade do enclave (em hardware real, vem do CPU)
 static const uint8_t SIMULATED_MRENCLAVE[32] = {
@@ -69,9 +82,64 @@ static int init_qe_keys()
     return 0;
 }
 
+/* ========== SESSION LIFECYCLE ========== */
+
+int ecall_open_session(uint8_t* party_id, size_t id_len, uint32_t* handle_out)
+{
+    *handle_out = 0;
+    if (party_id == NULL || id_len == 0 || id_len > SESSION_ID_MAX) return -1;
+
+    sgx_thread_mutex_lock(&sessions_mutex);
+    int idx = -1;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!sessions[i].in_use) { idx = i; break; }
+    }
+    if (idx < 0) {
+        sgx_thread_mutex_unlock(&sessions_mutex);
+        ocall_print_string("Enclave: session pool exausto\n");
+        return -2;
+    }
+    sessions[idx].in_use = 1;
+    sessions[idx].id_len = id_len;
+    memcpy(sessions[idx].party_id, party_id, id_len);
+    sessions[idx].party_id[id_len] = 0;
+    sgx_thread_mutex_unlock(&sessions_mutex);
+
+    *handle_out = (uint32_t)(idx + 1);
+    ocall_print_string("Enclave: session aberta\n");
+    return 0;
+}
+
+int ecall_close_session(uint32_t handle)
+{
+    if (handle == 0 || handle > MAX_SESSIONS) return -1;
+    uint32_t idx = handle - 1;
+
+    sgx_thread_mutex_lock(&sessions_mutex);
+    if (!sessions[idx].in_use) {
+        sgx_thread_mutex_unlock(&sessions_mutex);
+        return -2;
+    }
+    memset(&sessions[idx], 0, sizeof(sessions[idx]));
+    sgx_thread_mutex_unlock(&sessions_mutex);
+
+    ocall_print_string("Enclave: session fechada\n");
+    return 0;
+}
+
+static int session_is_valid(uint32_t handle)
+{
+    if (handle == 0 || handle > MAX_SESSIONS) return 0;
+    sgx_thread_mutex_lock(&sessions_mutex);
+    int ok = sessions[handle - 1].in_use;
+    sgx_thread_mutex_unlock(&sessions_mutex);
+    return ok;
+}
+
 /* ========== DCAP ATTESTATION ========== */
 
-int ecall_generate_report(uint8_t* nonce,
+int ecall_generate_report(uint32_t handle,
+                           uint8_t* nonce,
                            uint8_t* mrenclave_out,
                            uint8_t* mrsigner_out,
                            uint16_t* isv_prod_id,
@@ -80,6 +148,11 @@ int ecall_generate_report(uint8_t* nonce,
                            uint8_t* signature_out,
                            uint8_t* qe_identity_out)
 {
+    if (!session_is_valid(handle)) {
+        ocall_print_string("Enclave: generate_report com handle invalido\n");
+        return -4;
+    }
+
     // 1. Inicializar Quoting Enclave
     if (init_qe_keys() != 0) {
         ocall_print_string("Enclave: erro ao inicializar QE\n");
@@ -105,8 +178,8 @@ int ecall_generate_report(uint8_t* nonce,
     memcpy(to_sign + 32, SIMULATED_MRSIGNER, 32);
     memcpy(to_sign + 64, user_data_out, 32);
 
-    sgx_ecc_state_handle_t handle;
-    sgx_status_t s = sgx_ecc256_open_context(&handle);
+    sgx_ecc_state_handle_t ecc_ctx;
+    sgx_status_t s = sgx_ecc256_open_context(&ecc_ctx);
     if (s != SGX_SUCCESS) {
         ocall_print_string("Enclave: erro ao abrir contexto ECC para assinatura\n");
         return -2;
@@ -114,8 +187,8 @@ int ecall_generate_report(uint8_t* nonce,
 
     sgx_ec256_signature_t sig;
     s = sgx_ecdsa_sign(to_sign, 96,
-                        &qe_sign_key, &sig, handle);
-    sgx_ecc256_close_context(handle);
+                        &qe_sign_key, &sig, ecc_ctx);
+    sgx_ecc256_close_context(ecc_ctx);
 
     if (s != SGX_SUCCESS) {
         ocall_print_string("Enclave: erro ao assinar quote\n");
