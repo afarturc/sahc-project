@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 int tcp_listen(const char* host, int port, int backlog)
@@ -83,6 +84,29 @@ int tcp_connect(const char* host, int port)
     return fd;
 }
 
+int tcp_set_timeout(int fd, int recv_secs, int send_secs)
+{
+    if (recv_secs > 0) {
+        struct timeval tv;
+        tv.tv_sec = recv_secs;
+        tv.tv_usec = 0;
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+            perror("setsockopt SO_RCVTIMEO");
+            return -1;
+        }
+    }
+    if (send_secs > 0) {
+        struct timeval tv;
+        tv.tv_sec = send_secs;
+        tv.tv_usec = 0;
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+            perror("setsockopt SO_SNDTIMEO");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 int tcp_send_all(int fd, const void* buf, size_t len)
 {
     const uint8_t* p = (const uint8_t*)buf;
@@ -110,6 +134,11 @@ int tcp_recv_all(int fd, void* buf, size_t len)
         ssize_t n = recv(fd, p, left, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                fprintf(stderr, "recv: timeout after %zu/%zu bytes\n",
+                        got, len);
+                return -1;
+            }
             perror("recv");
             return -1;
         }

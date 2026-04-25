@@ -362,6 +362,9 @@ int main(int argc, char** argv)
     /* Connect. */
     int fd = tcp_connect(host, port);
     if (fd < 0) { identity_free(eph_priv); identity_free(lt_key); return 1; }
+    /* Match server-side 30 s; if the enclave hangs we'd rather error out
+     * than block the REPL forever. */
+    tcp_set_timeout(fd, 30, 30);
     printf("Client: connected to %s:%d (party=%s)\n", host, port, party_id);
 
     /* Build ATTEST_REQ:

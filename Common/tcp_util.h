@@ -19,4 +19,8 @@ int tcp_send_all(int fd, const void* buf, size_t len);
 // before any bytes received.
 int tcp_recv_all(int fd, void* buf, size_t len);
 
+// Apply SO_RCVTIMEO / SO_SNDTIMEO. Either may be 0 to leave that direction
+// blocking. Returns 0 on success, -1 on setsockopt failure.
+int tcp_set_timeout(int fd, int recv_secs, int send_secs);
+
 #endif

@@ -483,6 +483,10 @@ int main(int argc, char** argv)
             if (g_stop) break;
             continue;
         }
+        /* 30 s idle on either direction kills the connection — protects
+         * the server from a client that handshakes and never speaks
+         * again, and bounds how long a stuck send blocks the loop. */
+        tcp_set_timeout(conn_fd, 30, 30);
         serve_connection(eid, conn_fd);
         close(conn_fd);
     }
