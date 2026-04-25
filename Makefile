@@ -59,9 +59,11 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs \
     -Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
     -Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
-.PHONY: all clean enclave sgx_server sgx_client mrenclave
+.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave
 
 all: sgx_server sgx_client enclave Include/expected_mrenclave.h
+
+sgx_bench: sgx_bench_bin
 
 # Auto-pin: extract MRENCLAVE from the freshly-signed enclave so the
 # client header matches what the enclave will report at handshake.
@@ -127,9 +129,21 @@ sgx_server_bin: $(Server_Cpp_Objects) $(Server_C_Objects) Enclave_u.o enclave.si
 sgx_client_bin: $(Client_Cpp_Objects)
 	g++ $(Client_Cpp_Objects) -o sgx_client $(Client_Link_Flags)
 
+# --- Bench harness (reuses Client/session.* + crypto deps) ---
+Bench_Cpp_Files := Bench/bench.cpp Client/session.cpp Client/identity.cpp \
+    Client/secure_frame.cpp Client/csv_loader.cpp \
+    Common/framing.cpp Common/tcp_util.cpp
+Bench_Cpp_Objects := $(Bench_Cpp_Files:.cpp=.o)
+
+Bench/%.o: Bench/%.cpp Include/expected_mrenclave.h
+	g++ $(Client_C_Flags) -IClient -c $< -o $@
+
+sgx_bench_bin: $(Bench_Cpp_Objects)
+	g++ $(Bench_Cpp_Objects) -o sgx_bench $(Client_Link_Flags)
+
 clean:
-	rm -f Server/*.o Client/*.o Common/*.o Common/third_party/*.o \
+	rm -f Server/*.o Client/*.o Bench/*.o Common/*.o Common/third_party/*.o \
 		Enclave/*.o *.o *.so \
-		sgx_server sgx_client \
+		sgx_server sgx_client sgx_bench \
 		Enclave/Enclave_t.* Enclave_u.* \
 		Include/expected_mrenclave.h

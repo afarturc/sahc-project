@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "patient.h"
+
 /* Opaque-ish handle to a live SGX session: the post-handshake key
  * material, AEAD counters, and the underlying socket. Bench harness and
  * client REPL share this surface so the security-critical handshake
@@ -31,6 +33,12 @@ int client_session_open(const char* host, int port, const char* party_id,
 
 /* SESSION_CLOSE (best-effort) + close(fd) + zero key material. Idempotent. */
 void client_session_close(ClientSession* s);
+
+/* Upload an in-memory record batch. Same semantics as upload_csv —
+ * 0 on completed (including soft-reject), -1 on torn channel. */
+int client_session_upload_records(ClientSession* s,
+                                  const PatientRecord* recs, int n,
+                                  uint32_t* out_accepted, int verbose);
 
 /* Upload all records in csv_path. Returns 0 on completed (including
  * soft-reject like role-not-authorized), -1 on torn channel. out_accepted

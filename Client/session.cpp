@@ -280,19 +280,13 @@ void client_session_close(ClientSession* s)
     memset(s->iv_prefix,   0, sizeof(s->iv_prefix));
 }
 
-int client_session_upload_csv(ClientSession* s, const char* csv_path,
-                              uint32_t* out_accepted, int verbose)
+int client_session_upload_records(ClientSession* s,
+                                  const PatientRecord* recs, int n,
+                                  uint32_t* out_accepted, int verbose)
 {
-    if (s == NULL || s->fd < 0) return -1;
+    if (s == NULL || s->fd < 0 || recs == NULL || n <= 0) return -1;
 
-    PatientRecord recs[MAX_CLIENT_RECORDS];
-    int n = csv_load(csv_path, recs, MAX_CLIENT_RECORDS);
-    if (n <= 0) {
-        fprintf(stderr, "upload: cannot load %s\n", csv_path);
-        return 0;
-    }
-
-    VLOG(verbose, "upload: sending %d records from %s\n", n, csv_path);
+    VLOG(verbose, "upload: sending %d records\n", n);
     if (sf_send(s->fd, MSG_UPLOAD, &s->seq_send, s->session_key, s->iv_prefix,
                 (const uint8_t*)recs,
                 (uint32_t)(n * (int)sizeof(PatientRecord))) != 0) {
@@ -328,6 +322,21 @@ int client_session_upload_csv(ClientSession* s, const char* csv_path,
     if (out_accepted) *out_accepted = accepted;
     VLOG(verbose, "upload: records_accepted=%u\n", accepted);
     return 0;
+}
+
+int client_session_upload_csv(ClientSession* s, const char* csv_path,
+                              uint32_t* out_accepted, int verbose)
+{
+    if (s == NULL || s->fd < 0) return -1;
+
+    PatientRecord recs[MAX_CLIENT_RECORDS];
+    int n = csv_load(csv_path, recs, MAX_CLIENT_RECORDS);
+    if (n <= 0) {
+        fprintf(stderr, "upload: cannot load %s\n", csv_path);
+        return 0;
+    }
+    VLOG(verbose, "upload: loaded %d records from %s\n", n, csv_path);
+    return client_session_upload_records(s, recs, n, out_accepted, verbose);
 }
 
 int client_session_query(ClientSession* s, int field, int op, int diag,
