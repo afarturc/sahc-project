@@ -6,29 +6,49 @@
 #include "sgx_thread.h"
 #include "sgx_trts.h"
 #include "sgx_tseal.h"
+#include "sgx_utils.h"
 #include <stdlib.h>
 #include <string.h>
 
-/* ========== ENCLAVE IDENTITY (SIMULATED) ========== */
-
-static const uint8_t SIMULATED_MRENCLAVE[32] = {
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89
-};
-static const uint8_t SIMULATED_MRSIGNER[32] = {
-    0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,
-    0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,
-    0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,
-    0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88
-};
+/* ========== ENCLAVE IDENTITY ==========
+ *
+ * MRENCLAVE/MRSIGNER are read from a self-targeted REPORT via
+ * sgx_create_report — works in both SIM and HW. In SIM the SDK
+ * returns the measurements baked into the SIGSTRUCT by sgx_sign,
+ * which are the same values `sgx_sign dump` exposes; on HW the
+ * CPU returns the real ones. The host extracts the expected
+ * MRENCLAVE from the .signed.so at build time so the client can
+ * pin against the same value the enclave reports.
+ *
+ * QE_IDENTITY stays a placeholder — the real Quoting Enclave
+ * identity only enters the picture once we move to DCAP. */
 static const uint8_t QE_IDENTITY[32] = {
     0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
     0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
     0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
     0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11
 };
+
+/* Reads the calling enclave's measurement via sgx_create_report against
+ * its own target_info. Cheap (~µs) so we just call it on every quote
+ * build; no caching needed. */
+static int self_measurement(uint8_t mrenclave_out[32], uint8_t mrsigner_out[32])
+{
+    sgx_target_info_t ti;
+    memset(&ti, 0, sizeof(ti));
+    sgx_status_t s = sgx_self_target(&ti);
+    if (s != SGX_SUCCESS) return -1;
+
+    sgx_report_data_t rd;
+    memset(&rd, 0, sizeof(rd));
+    sgx_report_t report;
+    s = sgx_create_report(&ti, &rd, &report);
+    if (s != SGX_SUCCESS) return -1;
+
+    memcpy(mrenclave_out, &report.body.mr_enclave, 32);
+    memcpy(mrsigner_out,  &report.body.mr_signer,  32);
+    return 0;
+}
 
 static sgx_ec256_private_t qe_sign_key;
 static sgx_ec256_public_t  qe_verify_key;
@@ -386,8 +406,10 @@ static int kex_and_quote(uint8_t* nonce,
     memcpy(user_data_out, &hash, 32);
 
     /* Build + sign quote */
-    memcpy(mrenclave_out, SIMULATED_MRENCLAVE, 32);
-    memcpy(mrsigner_out,  SIMULATED_MRSIGNER,  32);
+    if (self_measurement(mrenclave_out, mrsigner_out) != 0) {
+        memset(session_key_out, 0, SESSION_KEY_SIZE);
+        return -5;
+    }
     *isv_prod_id_out = 1;
     *isv_svn_out     = 1;
 
@@ -1041,4 +1063,10 @@ int ecall_unseal_state(uint8_t* blob, size_t blob_len)
 
     ocall_print_string("Enclave: state unsealed\n");
     return 0;
+}
+
+int ecall_get_mrenclave(uint8_t* mrenclave)
+{
+    uint8_t mrsigner_unused[32];
+    return self_measurement(mrenclave, mrsigner_unused);
 }

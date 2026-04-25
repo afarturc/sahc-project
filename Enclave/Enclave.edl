@@ -96,6 +96,13 @@ enclave {
             [in, count=blob_len] uint8_t* blob,
             size_t blob_len
         );
+
+        /* Returns the calling enclave's own MRENCLAVE — used by the
+         * build-time extract_mrenclave.sh helper so the client header
+         * pins the same value the enclave will report at handshake. */
+        public int ecall_get_mrenclave(
+            [out, count=32] uint8_t* mrenclave
+        );
     };
 
     untrusted {

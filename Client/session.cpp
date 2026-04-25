@@ -14,18 +14,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "expected_mrenclave.h"
+
 #define RECV_BUF_CAP       (32 * 1024)
 #define MAX_CLIENT_RECORDS 1024
-
-/* MRENCLAVE the client is willing to talk to. Mirrors SIMULATED_MRENCLAVE
- * in Enclave.cpp; on Fase 4 (DCAP real) this gets replaced by the value
- * sgx_sign emits for the signed enclave binary. */
-static const uint8_t EXPECTED_MRENCLAVE[32] = {
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
-    0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89
-};
 
 static const uint8_t ATTEST_PREFIX[] = "SAHC-attest-v1";
 #define ATTEST_PREFIX_LEN (sizeof(ATTEST_PREFIX) - 1)

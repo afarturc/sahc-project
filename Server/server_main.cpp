@@ -465,6 +465,26 @@ static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
 
 int main(int argc, char** argv)
 {
+    /* --print-mrenclave: load the enclave, print its MRENCLAVE in hex,
+     * exit. Used by scripts/extract_mrenclave.sh to populate the pinned
+     * value the client compares against. */
+    if (argc >= 2 && strcmp(argv[1], "--print-mrenclave") == 0) {
+        sgx_enclave_id_t eid = 0;
+        if (init_enclave(&eid) != 0) return 1;
+        uint8_t mre[32];
+        int rc = 0;
+        sgx_status_t s = ecall_get_mrenclave(eid, &rc, mre);
+        sgx_destroy_enclave(eid);
+        if (s != SGX_SUCCESS || rc != 0) {
+            fprintf(stderr, "Server: ecall_get_mrenclave failed (s=0x%x rc=%d)\n",
+                    s, rc);
+            return 1;
+        }
+        for (int i = 0; i < 32; i++) printf("%02x", mre[i]);
+        printf("\n");
+        return 0;
+    }
+
     const char* host = SAHC_DEFAULT_HOST;
     int         port = SAHC_DEFAULT_PORT;
     if (argc >= 2) host = argv[1];

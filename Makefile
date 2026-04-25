@@ -59,9 +59,18 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs \
     -Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
     -Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
-.PHONY: all clean enclave sgx_server sgx_client
+.PHONY: all clean enclave sgx_server sgx_client mrenclave
 
-all: sgx_server sgx_client enclave
+all: sgx_server sgx_client enclave Include/expected_mrenclave.h
+
+# Auto-pin: extract MRENCLAVE from the freshly-signed enclave so the
+# client header matches what the enclave will report at handshake.
+# Depends on both the enclave (source of the measurement) and the
+# server binary (the runner that prints it).
+Include/expected_mrenclave.h: enclave.signed.so sgx_server_bin scripts/extract_mrenclave.sh
+	./scripts/extract_mrenclave.sh
+
+mrenclave: Include/expected_mrenclave.h
 
 enclave: enclave.signed.so
 
@@ -102,7 +111,7 @@ Enclave_u.o: Enclave_u.c
 Server/%.o: Server/%.cpp Enclave_u.c
 	g++ $(Server_C_Flags) -c $< -o $@
 
-Client/%.o: Client/%.cpp
+Client/%.o: Client/%.cpp Include/expected_mrenclave.h
 	g++ $(Client_C_Flags) -c $< -o $@
 
 Common/%.o: Common/%.cpp
@@ -122,4 +131,5 @@ clean:
 	rm -f Server/*.o Client/*.o Common/*.o Common/third_party/*.o \
 		Enclave/*.o *.o *.so \
 		sgx_server sgx_client \
-		Enclave/Enclave_t.* Enclave_u.*
+		Enclave/Enclave_t.* Enclave_u.* \
+		Include/expected_mrenclave.h
