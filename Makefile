@@ -22,11 +22,14 @@ Untrusted_C_Flags := $(SGX_COMMON_FLAGS) -fPIC -Wall -Wno-attributes \
 # --- Server (links the enclave) ---
 Server_C_Flags := $(Untrusted_C_Flags) -I.
 Server_Link_Flags := -L$(SGX_LIBRARY_PATH) \
-    -l$(Urts_Library_Name) -lpthread
+    -l$(Urts_Library_Name) -lpthread -lm
 
-Server_Cpp_Files := Server/server_main.cpp \
+Server_Cpp_Files := Server/server_main.cpp Server/parties_loader.cpp \
     Common/framing.cpp Common/tcp_util.cpp
 Server_Cpp_Objects := $(Server_Cpp_Files:.cpp=.o)
+
+Server_C_Files := Common/third_party/cJSON.c
+Server_C_Objects := $(Server_C_Files:.c=.o)
 
 # --- Client (no enclave, pure TCP + crypto later) ---
 Client_C_Flags := $(Untrusted_C_Flags)
@@ -102,14 +105,18 @@ Client/%.o: Client/%.cpp
 Common/%.o: Common/%.cpp
 	g++ $(Untrusted_C_Flags) -c $< -o $@
 
+Common/third_party/%.o: Common/third_party/%.c
+	gcc $(Untrusted_C_Flags) -c $< -o $@
+
 # --- Final binaries ---
-sgx_server_bin: $(Server_Cpp_Objects) Enclave_u.o enclave.signed.so
-	g++ $(Server_Cpp_Objects) Enclave_u.o -o sgx_server $(Server_Link_Flags)
+sgx_server_bin: $(Server_Cpp_Objects) $(Server_C_Objects) Enclave_u.o enclave.signed.so
+	g++ $(Server_Cpp_Objects) $(Server_C_Objects) Enclave_u.o -o sgx_server $(Server_Link_Flags)
 
 sgx_client_bin: $(Client_Cpp_Objects)
 	g++ $(Client_Cpp_Objects) -o sgx_client $(Client_Link_Flags)
 
 clean:
-	rm -f Server/*.o Client/*.o Common/*.o Enclave/*.o *.o *.so \
+	rm -f Server/*.o Client/*.o Common/*.o Common/third_party/*.o \
+		Enclave/*.o *.o *.so \
 		sgx_server sgx_client \
 		Enclave/Enclave_t.* Enclave_u.*

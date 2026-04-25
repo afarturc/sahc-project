@@ -16,6 +16,7 @@ enclave.signed.so
 # Runtime state (milestone 2)
 parties/*.key
 parties/*.priv
+parties/*.pub
 data/sealed/
 logs/
 

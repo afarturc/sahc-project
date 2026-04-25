@@ -2,6 +2,30 @@ enclave {
     from "sgx_tstdc.edl" import *;
 
     trusted {
+        /* Parties loading — one-shot at server startup */
+        public int ecall_parties_begin(uint32_t quorum_m);
+
+        public int ecall_parties_add_hospital(
+            [in, count=id_len] uint8_t* id,
+            size_t id_len,
+            [in, count=64] uint8_t* pubkey
+        );
+
+        public int ecall_parties_add_researcher(
+            [in, count=id_len] uint8_t* id,
+            size_t id_len,
+            [in, count=64] uint8_t* pubkey,
+            [in, count=approvals_len] uint8_t* approvals_blob,
+            size_t approvals_len,
+            [out] uint32_t* accepted
+        );
+
+        public int ecall_parties_end(
+            [out] uint32_t* hospitals_count,
+            [out] uint32_t* researchers_count,
+            [out] uint32_t* rejected_count
+        );
+
         /* Session lifecycle */
         public int ecall_open_session(
             [in, count=id_len] uint8_t* party_id,

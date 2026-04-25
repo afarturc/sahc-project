@@ -2,6 +2,7 @@
 #include "sgx_urts.h"
 
 #include "framing.h"
+#include "parties_loader.h"
 #include "tcp_util.h"
 #include "protocol.h"
 #include "types.h"
@@ -13,6 +14,7 @@
 #include <unistd.h>
 
 #define ENCLAVE_FILE "enclave.signed.so"
+#define PARTIES_FILE "authorized_parties.json"
 #define RECV_BUF_CAP 4096
 
 void ocall_print_string(const char* str) { printf("%s", str); }
@@ -205,6 +207,22 @@ int main(int argc, char** argv)
 
     sgx_enclave_id_t eid = 0;
     if (init_enclave(&eid) != 0) return 1;
+
+    uint32_t n_hosp = 0, n_res = 0, n_rej = 0;
+    int pl = parties_load_into_enclave(eid, PARTIES_FILE,
+                                       &n_hosp, &n_res, &n_rej);
+    if (pl == -1) {
+        fprintf(stderr, "Server: %s not found — run scripts/gen_identity.py "
+                        "and scripts/build_authorized_parties.py first\n",
+                PARTIES_FILE);
+    } else if (pl != 0) {
+        fprintf(stderr, "Server: parties load failed (rc=%d)\n", pl);
+        sgx_destroy_enclave(eid);
+        return 1;
+    } else {
+        printf("Server: parties loaded — %u hospitals, %u researchers, "
+               "%u rejected\n", n_hosp, n_res, n_rej);
+    }
 
     int listen_fd = tcp_listen(host, port, 8);
     if (listen_fd < 0) {

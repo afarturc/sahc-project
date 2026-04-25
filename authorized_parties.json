@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "quorum_m": 2,
+  "hospitals": [
+    {
+      "id": "hosp-santa-maria",
+      "pubkey": "e105f04a8730f387be0df646815ce07674234a76c0702e347aea8cea59fc25ffd9d7ec3b5d9c570940b2d72c2d89d253af2af18b43c64cdde4c9874a7143f8c6"
+    },
+    {
+      "id": "hosp-sao-joao",
+      "pubkey": "352742385061001ae7062a3166d43a8fbb2956a59e9c4133438afdf0d7f356c2a07def690e5ee5260386071071b4122e1f8352761df09a39673c093162b85e2d"
+    },
+    {
+      "id": "hosp-santo-antonio",
+      "pubkey": "e4a89ef1744ec44353bad98f07e09aa17642bde406f082a38bd33099f4f3691e5f28eaf3493c408b484fd1042a1640ba57169e1918d58ed9368ec423478d8918"
+    }
+  ],
+  "researchers": [
+    {
+      "id": "fcup-research",
+      "pubkey": "0d893ba1a01336639e3ab13ab2890f809465f02848668e0abf0adbc387832acb632ca7485e52949ead049737e14530921341141c3ec5ec759f0d5decfe122ad9",
+      "approvals": [
+        {
+          "hospital_id": "hosp-santa-maria",
+          "signature": "954c9c482cf3c31cf8be6d08f3810368142646fd25bd10726ebe73f60c81957cf1ba6b8b22d3ca08d6dc56279585dfec217d8aadb8873c3f84d79ea5b66a472e"
+        },
+        {
+          "hospital_id": "hosp-sao-joao",
+          "signature": "99da28c90d945b5ff2fc8bf7f87153d35311ee612bde54682f7ae9f2a8f08290b5f4030faca7542d6fd001f5d5fa1a6156abea13744dbd9626350fe8db024303"
+        }
+      ]
+    }
+  ]
+}

@@ -17,6 +17,184 @@ typedef struct {
 static SessionContext sessions[MAX_SESSIONS];
 static sgx_thread_mutex_t sessions_mutex = SGX_THREAD_MUTEX_INITIALIZER;
 
+/* ========== AUTHORIZED PARTIES ========== */
+
+#define MAX_PARTIES      16
+#define PARTY_ID_MAX     63
+#define PUBKEY_SIZE      64
+#define SIGNATURE_SIZE   64
+
+typedef enum { ROLE_NONE = 0, ROLE_HOSPITAL = 1, ROLE_RESEARCHER = 2 } PartyRole;
+
+typedef struct {
+    PartyRole role;
+    size_t    id_len;
+    uint8_t   id[PARTY_ID_MAX + 1];
+    uint8_t   pubkey[PUBKEY_SIZE];
+} AuthorizedParty;
+
+static AuthorizedParty parties[MAX_PARTIES];
+static uint32_t        parties_count    = 0;
+static uint32_t        parties_quorum_m = 0;
+static uint32_t        parties_rejected = 0;
+static int             parties_loading  = 0;
+
+static const uint8_t APPROVAL_PREFIX[] = "SAHC-approve-v1";
+#define APPROVAL_PREFIX_LEN (sizeof(APPROVAL_PREFIX) - 1)
+
+static int find_hospital(const uint8_t* id, size_t id_len)
+{
+    for (uint32_t i = 0; i < parties_count; i++) {
+        if (parties[i].role == ROLE_HOSPITAL &&
+            parties[i].id_len == id_len &&
+            memcmp(parties[i].id, id, id_len) == 0) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int find_party_any(const uint8_t* id, size_t id_len)
+{
+    for (uint32_t i = 0; i < parties_count; i++) {
+        if (parties[i].id_len == id_len &&
+            memcmp(parties[i].id, id, id_len) == 0) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int verify_approval(const uint8_t* hospital_pub,
+                           const uint8_t* researcher_id, size_t rid_len,
+                           const uint8_t* researcher_pub,
+                           const uint8_t* signature)
+{
+    uint8_t msg[APPROVAL_PREFIX_LEN + PARTY_ID_MAX + PUBKEY_SIZE];
+    size_t off = 0;
+    memcpy(msg + off, APPROVAL_PREFIX, APPROVAL_PREFIX_LEN); off += APPROVAL_PREFIX_LEN;
+    memcpy(msg + off, researcher_id, rid_len);               off += rid_len;
+    memcpy(msg + off, researcher_pub, PUBKEY_SIZE);          off += PUBKEY_SIZE;
+
+    sgx_ec256_public_t pub;
+    memcpy(pub.gx, hospital_pub,              32);
+    memcpy(pub.gy, hospital_pub + 32,         32);
+
+    sgx_ec256_signature_t sig;
+    memcpy(sig.x, signature,                  32);
+    memcpy(sig.y, signature + 32,             32);
+
+    sgx_ecc_state_handle_t ctx;
+    if (sgx_ecc256_open_context(&ctx) != SGX_SUCCESS) return 0;
+
+    uint8_t result = 0;
+    sgx_status_t s = sgx_ecdsa_verify(msg, (uint32_t)off, &pub, &sig, &result, ctx);
+    sgx_ecc256_close_context(ctx);
+    return (s == SGX_SUCCESS && result == SGX_EC_VALID) ? 1 : 0;
+}
+
+int ecall_parties_begin(uint32_t quorum_m)
+{
+    if (quorum_m == 0) return -1;
+    memset(parties, 0, sizeof(parties));
+    parties_count    = 0;
+    parties_quorum_m = quorum_m;
+    parties_rejected = 0;
+    parties_loading  = 1;
+    ocall_print_string("Enclave: parties begin\n");
+    return 0;
+}
+
+int ecall_parties_add_hospital(uint8_t* id, size_t id_len, uint8_t* pubkey)
+{
+    if (!parties_loading) return -1;
+    if (id == NULL || pubkey == NULL) return -1;
+    if (id_len == 0 || id_len > PARTY_ID_MAX) return -1;
+    if (parties_count >= MAX_PARTIES) return -2;
+    if (find_party_any(id, id_len) >= 0) return -3;  // duplicate
+
+    AuthorizedParty* p = &parties[parties_count++];
+    p->role = ROLE_HOSPITAL;
+    p->id_len = id_len;
+    memcpy(p->id, id, id_len);
+    p->id[id_len] = 0;
+    memcpy(p->pubkey, pubkey, PUBKEY_SIZE);
+    return 0;
+}
+
+int ecall_parties_add_researcher(uint8_t* id, size_t id_len,
+                                  uint8_t* pubkey,
+                                  uint8_t* approvals_blob, size_t approvals_len,
+                                  uint32_t* accepted)
+{
+    *accepted = 0;
+    if (!parties_loading) return -1;
+    if (id == NULL || pubkey == NULL || approvals_blob == NULL) return -1;
+    if (id_len == 0 || id_len > PARTY_ID_MAX) return -1;
+    if (parties_count >= MAX_PARTIES) return -2;
+    if (find_party_any(id, id_len) >= 0) return -3;  // duplicate
+
+    // Walk approvals blob: [u8 hid_len | hid | sig[64]] repeated.
+    // Count distinct hospitals that produce a valid signature.
+    int signers[MAX_PARTIES];
+    int n_signers = 0;
+    size_t off = 0;
+
+    while (off < approvals_len) {
+        if (off + 1 > approvals_len) return -4;
+        uint8_t hid_len = approvals_blob[off++];
+        if (hid_len == 0 || hid_len > PARTY_ID_MAX) return -4;
+        if (off + hid_len + SIGNATURE_SIZE > approvals_len) return -4;
+        const uint8_t* hid = approvals_blob + off;  off += hid_len;
+        const uint8_t* sig = approvals_blob + off;  off += SIGNATURE_SIZE;
+
+        int h_idx = find_hospital(hid, hid_len);
+        if (h_idx < 0) continue;
+
+        int already_counted = 0;
+        for (int i = 0; i < n_signers; i++) {
+            if (signers[i] == h_idx) { already_counted = 1; break; }
+        }
+        if (already_counted) continue;
+
+        if (verify_approval(parties[h_idx].pubkey, id, id_len, pubkey, sig)) {
+            signers[n_signers++] = h_idx;
+        }
+    }
+
+    if ((uint32_t)n_signers < parties_quorum_m) {
+        parties_rejected++;
+        return 0;  // reported via *accepted = 0
+    }
+
+    AuthorizedParty* p = &parties[parties_count++];
+    p->role = ROLE_RESEARCHER;
+    p->id_len = id_len;
+    memcpy(p->id, id, id_len);
+    p->id[id_len] = 0;
+    memcpy(p->pubkey, pubkey, PUBKEY_SIZE);
+    *accepted = 1;
+    return 0;
+}
+
+int ecall_parties_end(uint32_t* hospitals_count,
+                       uint32_t* researchers_count,
+                       uint32_t* rejected_count)
+{
+    if (!parties_loading) return -1;
+    uint32_t h = 0, r = 0;
+    for (uint32_t i = 0; i < parties_count; i++) {
+        if (parties[i].role == ROLE_HOSPITAL)   h++;
+        else if (parties[i].role == ROLE_RESEARCHER) r++;
+    }
+    *hospitals_count   = h;
+    *researchers_count = r;
+    *rejected_count    = parties_rejected;
+    parties_loading    = 0;
+    ocall_print_string("Enclave: parties end\n");
+    return 0;
+}
+
 // Identidade do enclave (em hardware real, vem do CPU)
 static const uint8_t SIMULATED_MRENCLAVE[32] = {
     0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
