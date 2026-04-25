@@ -71,6 +71,17 @@ enclave {
             [out] size_t* resp_len
         );
 
+        /* Aggregate query over all_records[]. Any role may call. Refuses
+         * results below K_ANON_THRESHOLD matches. */
+        public int ecall_query(
+            uint32_t handle,
+            [in, count=req_len] uint8_t* req,
+            size_t req_len,
+            [out, count=resp_cap] uint8_t* resp,
+            size_t resp_cap,
+            [out] size_t* resp_len
+        );
+
         public int ecall_close_session(uint32_t handle);
     };
 

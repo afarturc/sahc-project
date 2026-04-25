@@ -73,4 +73,15 @@
 #define PROTO_ROLE_HOSPITAL    1
 #define PROTO_ROLE_RESEARCHER  2
 
+// QUERY_REQ plaintext: u32 field(LE) | u32 query_type(LE) | i32 filter_diag(LE)
+//   filter_diag < 0 means "any diagnosis"
+#define PROTO_QUERY_REQ_SIZE  12
+
+// QUERY_RESP plaintext: float result(LE 4) | u32 matched(LE 4) | u8 applied_k
+#define PROTO_QUERY_RESP_SIZE  9
+
+// k-anonymity threshold: queries returning fewer than this many matched
+// records are refused with E_INSUFFICIENT_RECORDS (no aggregate emitted).
+#define K_ANON_THRESHOLD       5
+
 #endif

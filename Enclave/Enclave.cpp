@@ -822,3 +822,101 @@ int ecall_upload_records(uint32_t handle,
     ocall_print_string("Enclave: UPLOAD persisted\n");
     return 0;
 }
+
+/* ========== QUERY ==========
+ *
+ * Plaintext request : u32 field | u32 query_type | i32 filter_diag (LE).
+ * Plaintext response: float result | u32 matched | u8 applied_k    (LE).
+ *
+ * Any authenticated role may query. Aggregates whose match count is
+ * below K_ANON_THRESHOLD are rejected before any number reaches the
+ * wire (rc=-10 -> E_INSUFFICIENT_RECORDS), so the enclave never leaks
+ * facts about small subgroups.
+ *
+ * rc:  0=OK  -1=invalid args  -2=invalid state  -5=AEAD failure
+ *     -7=decrypt fail/replay  -9=malformed payload  -10=below k-anon
+ */
+static uint32_t read_u32_le_(const uint8_t* p)
+{
+    return (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
+static void write_u32_le_(uint8_t* p, uint32_t v)
+{
+    p[0] = (uint8_t)(v        & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+int ecall_query(uint32_t handle,
+                uint8_t* req, size_t req_len,
+                uint8_t* resp, size_t resp_cap,
+                size_t* resp_len_out)
+{
+    *resp_len_out = 0;
+
+    uint8_t   pt[PROTO_QUERY_REQ_SIZE];
+    size_t    pt_len = 0;
+    PartyRole role;
+    int rc = session_decrypt_envelope(handle, MSG_QUERY_REQ,
+                                      req, req_len,
+                                      pt, sizeof(pt), &pt_len, &role);
+    if (rc != 0) return rc;
+    if (pt_len != PROTO_QUERY_REQ_SIZE) return -9;
+
+    uint32_t field      = read_u32_le_(pt);
+    uint32_t query_type = read_u32_le_(pt + 4);
+    int32_t  filter     = (int32_t)read_u32_le_(pt + 8);
+
+    if (field > FIELD_BLOOD_SUGAR || query_type > QUERY_COUNT) return -9;
+
+    float    sum = 0.0f, mn = 1e30f, mx = -1e30f;
+    uint32_t matched = 0;
+
+    sgx_thread_mutex_lock(&records_mutex);
+    for (size_t i = 0; i < total_records; i++) {
+        if (filter >= 0 &&
+            all_records[i].diagnosis != (uint32_t)filter) continue;
+        float v = 0.0f;
+        switch (field) {
+            case FIELD_AGE:         v = (float)all_records[i].age; break;
+            case FIELD_TEMPERATURE: v = all_records[i].temperature; break;
+            case FIELD_BLOOD_SUGAR: v = all_records[i].blood_sugar; break;
+        }
+        sum += v;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+        matched++;
+    }
+    sgx_thread_mutex_unlock(&records_mutex);
+
+    if (matched < K_ANON_THRESHOLD) {
+        ocall_print_string("Enclave: QUERY refused (k-anonymity)\n");
+        return -10;
+    }
+
+    float result = 0.0f;
+    switch (query_type) {
+        case QUERY_AVG:   result = sum / (float)matched; break;
+        case QUERY_MIN:   result = mn; break;
+        case QUERY_MAX:   result = mx; break;
+        case QUERY_COUNT: result = (float)matched; break;
+    }
+
+    uint8_t resp_pt[PROTO_QUERY_RESP_SIZE];
+    memcpy(resp_pt, &result, sizeof(float));    /* host is little-endian */
+    write_u32_le_(resp_pt + 4, matched);
+    resp_pt[8] = (uint8_t)K_ANON_THRESHOLD;
+
+    int erc = session_encrypt_envelope(handle, MSG_QUERY_RESP,
+                                       resp_pt, sizeof(resp_pt),
+                                       resp, resp_cap, resp_len_out);
+    if (erc != 0) return erc;
+
+    ocall_print_string("Enclave: QUERY OK\n");
+    return 0;
+}

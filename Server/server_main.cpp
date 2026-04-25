@@ -209,9 +209,46 @@ static int handle_upload(sgx_enclave_id_t eid, int fd,
         else if (rc == -9) wire = E_INVALID_STATE;
         fprintf(stderr, "Server: upload rejected rc=%d (wire=%u)\n", rc, wire);
         send_error(fd, wire);
-        return -1;
+        /* Decrypt failure means the channel is tainted; everything else
+         * is a user-side error — keep the session alive for REPL retries. */
+        return (wire == E_DECRYPT_FAIL) ? -1 : 0;
     }
     return frame_send(fd, MSG_UPLOAD_ACK, resp, (uint32_t)resp_len);
+}
+
+static int handle_query(sgx_enclave_id_t eid, int fd,
+                        const uint8_t* req, uint32_t req_len,
+                        uint32_t* session_handle)
+{
+    if (*session_handle == 0) {
+        fprintf(stderr, "Server: QUERY with no open session\n");
+        send_error(fd, E_INVALID_STATE);
+        return -1;
+    }
+
+    /* QUERY_RESP is 9 B plaintext + 36 B envelope = 45 B. */
+    uint8_t resp[64];
+    size_t  resp_len = 0;
+    int     rc       = 0;
+    sgx_status_t s = ecall_query(eid, &rc, *session_handle,
+                                 (uint8_t*)req, req_len,
+                                 resp, sizeof(resp), &resp_len);
+    if (s != SGX_SUCCESS) {
+        fprintf(stderr, "Server: ecall_query SGX failure 0x%x\n", s);
+        send_error(fd, E_INTERNAL);
+        return -1;
+    }
+    if (rc != 0) {
+        uint16_t wire = E_INTERNAL;
+        if      (rc == -2)  wire = E_INVALID_STATE;
+        else if (rc == -7)  wire = E_DECRYPT_FAIL;
+        else if (rc == -9)  wire = E_INVALID_STATE;
+        else if (rc == -10) wire = E_INSUFFICIENT_RECORDS;
+        fprintf(stderr, "Server: query rejected rc=%d (wire=%u)\n", rc, wire);
+        send_error(fd, wire);
+        return (wire == E_DECRYPT_FAIL) ? -1 : 0;
+    }
+    return frame_send(fd, MSG_QUERY_RESP, resp, (uint32_t)resp_len);
 }
 
 static void close_session_if_open(sgx_enclave_id_t eid, uint32_t* handle)
@@ -259,6 +296,9 @@ static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
             break;
         case MSG_UPLOAD:
             rc = handle_upload(eid, conn_fd, buf, len, &session_handle);
+            break;
+        case MSG_QUERY_REQ:
+            rc = handle_query(eid, conn_fd, buf, len, &session_handle);
             break;
         case MSG_SESSION_CLOSE:
             printf("Server: SESSION_CLOSE received\n");

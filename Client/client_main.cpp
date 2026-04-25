@@ -57,16 +57,281 @@ static const uint8_t ATTEST_PREFIX[] = "SAHC-attest-v1";
 static const uint8_t HKDF_SALT[] = "SAHC-v1";
 #define HKDF_SALT_LEN (sizeof(HKDF_SALT) - 1)
 
+static int parse_field(const char* s)
+{
+    if (!s) return -1;
+    if (!strcmp(s, "age"))                                  return FIELD_AGE;
+    if (!strcmp(s, "temperature") || !strcmp(s, "temp"))    return FIELD_TEMPERATURE;
+    if (!strcmp(s, "blood_sugar") || !strcmp(s, "sugar"))   return FIELD_BLOOD_SUGAR;
+    return -1;
+}
+
+static int parse_op(const char* s)
+{
+    if (!s) return -1;
+    if (!strcmp(s, "avg"))   return QUERY_AVG;
+    if (!strcmp(s, "min"))   return QUERY_MIN;
+    if (!strcmp(s, "max"))   return QUERY_MAX;
+    if (!strcmp(s, "count")) return QUERY_COUNT;
+    return -1;
+}
+
+static int parse_diag(const char* s)
+{
+    if (!s || !strcmp(s, "any"))                                     return -1;
+    if (!strcmp(s, "healthy"))                                       return DIAG_HEALTHY;
+    if (!strcmp(s, "diabetes"))                                      return DIAG_DIABETES;
+    if (!strcmp(s, "hypertension") || !strcmp(s, "htn"))             return DIAG_HYPERTENSION;
+    if (!strcmp(s, "infection"))                                     return DIAG_INFECTION;
+    return -2;  /* signal "invalid" (since -1 already means "any") */
+}
+
+static void write_u32_le(uint8_t* p, uint32_t v)
+{
+    p[0] = (uint8_t)(v        & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static uint32_t read_u32_le(const uint8_t* p)
+{
+    return (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
+/* Reusable command primitives.
+ *
+ * Return value:
+ *    0 = command completed (OK or soft-rejected — REPL keeps going);
+ *   -1 = transport/AEAD error — the channel is unusable, caller must
+ *        tear down the session.
+ *
+ * Soft rejections (E_UNAUTHORIZED, E_INSUFFICIENT_RECORDS, malformed
+ * client input) are reported to stdout/stderr but the session stays
+ * alive; the server matches this contract by not closing on those. */
+
+static int do_upload(int fd, uint64_t* seq_send, uint64_t* seq_recv,
+                     const uint8_t key[16], const uint8_t iv_prefix[4],
+                     const char* csv_path)
+{
+    PatientRecord recs[MAX_CLIENT_RECORDS];
+    int n = csv_load(csv_path, recs, MAX_CLIENT_RECORDS);
+    if (n <= 0) {
+        fprintf(stderr, "upload: cannot load %s\n", csv_path);
+        return 0;  /* user error — keep session */
+    }
+
+    printf("upload: sending %d records from %s\n", n, csv_path);
+    if (sf_send(fd, MSG_UPLOAD, seq_send, key, iv_prefix,
+                (const uint8_t*)recs,
+                (uint32_t)(n * (int)sizeof(PatientRecord))) != 0) {
+        fprintf(stderr, "upload: sf_send failed\n");
+        return -1;
+    }
+
+    uint8_t  ack[64];
+    uint32_t ack_len = 0;
+    uint8_t  ack_type = 0;
+    if (sf_recv(fd, seq_recv, key, iv_prefix, &ack_type,
+                ack, sizeof(ack), &ack_len) != 0) {
+        fprintf(stderr, "upload: sf_recv failed\n");
+        return -1;
+    }
+    if (ack_type == MSG_ERROR && ack_len >= 2) {
+        uint16_t code = ((uint16_t)ack[0] << 8) | ack[1];
+        if (code == E_UNAUTHORIZED) {
+            fprintf(stderr, "upload: refused — role not authorised\n");
+        } else if (code == E_DECRYPT_FAIL) {
+            fprintf(stderr, "upload: decrypt fail (channel tainted)\n");
+            return -1;
+        } else {
+            fprintf(stderr, "upload: server ERROR code=%u\n", code);
+        }
+        return 0;
+    }
+    if (ack_type != MSG_UPLOAD_ACK || ack_len != 4) {
+        fprintf(stderr, "upload: bad ACK (type=0x%02x len=%u)\n",
+                ack_type, ack_len);
+        return -1;
+    }
+    uint32_t accepted = (uint32_t)ack[0]
+                      | ((uint32_t)ack[1] << 8)
+                      | ((uint32_t)ack[2] << 16)
+                      | ((uint32_t)ack[3] << 24);
+    printf("upload: records_accepted=%u\n", accepted);
+    return 0;
+}
+
+static int do_query(int fd, uint64_t* seq_send, uint64_t* seq_recv,
+                    const uint8_t key[16], const uint8_t iv_prefix[4],
+                    int field, int op, int diag,
+                    const char* field_label, const char* op_label,
+                    const char* diag_label)
+{
+    uint8_t qreq[PROTO_QUERY_REQ_SIZE];
+    write_u32_le(qreq + 0, (uint32_t)field);
+    write_u32_le(qreq + 4, (uint32_t)op);
+    write_u32_le(qreq + 8, (uint32_t)diag);
+
+    printf("query: %s(%s) where diag=%s\n",
+           op_label, field_label, diag_label ? diag_label : "any");
+
+    if (sf_send(fd, MSG_QUERY_REQ, seq_send, key, iv_prefix,
+                qreq, sizeof(qreq)) != 0) {
+        fprintf(stderr, "query: sf_send failed\n");
+        return -1;
+    }
+
+    uint8_t  resp[64];
+    uint32_t resp_len = 0;
+    uint8_t  resp_type = 0;
+    if (sf_recv(fd, seq_recv, key, iv_prefix, &resp_type,
+                resp, sizeof(resp), &resp_len) != 0) {
+        fprintf(stderr, "query: sf_recv failed\n");
+        return -1;
+    }
+    if (resp_type == MSG_ERROR && resp_len >= 2) {
+        uint16_t code = ((uint16_t)resp[0] << 8) | resp[1];
+        if (code == E_INSUFFICIENT_RECORDS) {
+            printf("query: refused — below k-anonymity threshold\n");
+        } else if (code == E_DECRYPT_FAIL) {
+            fprintf(stderr, "query: decrypt fail (channel tainted)\n");
+            return -1;
+        } else {
+            fprintf(stderr, "query: server ERROR code=%u\n", code);
+        }
+        return 0;
+    }
+    if (resp_type != MSG_QUERY_RESP || resp_len != PROTO_QUERY_RESP_SIZE) {
+        fprintf(stderr, "query: bad RESP (type=0x%02x len=%u)\n",
+                resp_type, resp_len);
+        return -1;
+    }
+    float    result;
+    uint32_t matched;
+    uint8_t  applied_k;
+    memcpy(&result, resp, sizeof(float));
+    matched   = read_u32_le(resp + 4);
+    applied_k = resp[8];
+    printf("query: result=%.3f matched=%u applied_k=%u\n",
+           result, matched, applied_k);
+    return 0;
+}
+
+static void print_repl_help(void)
+{
+    printf(
+        "commands:\n"
+        "  upload <csv_path>             — push records (HOSPITAL only)\n"
+        "  query <field> <op> [diag]     — aggregate (any role)\n"
+        "      field: age | temperature | blood_sugar\n"
+        "      op:    avg | min | max | count\n"
+        "      diag:  any | healthy | diabetes | hypertension | infection\n"
+        "  help                          — this message\n"
+        "  quit                          — close the session and exit\n");
+}
+
+/* Returns 0 on clean exit (quit / EOF), -1 if the session died mid-command. */
+static int repl_loop(int fd, uint64_t* seq_send, uint64_t* seq_recv,
+                     const uint8_t key[16], const uint8_t iv_prefix[4])
+{
+    char line[256];
+    int  is_tty = isatty(fileno(stdin));
+
+    if (is_tty) {
+        printf("Entering REPL. 'help' for commands, 'quit' to exit.\n");
+    }
+
+    for (;;) {
+        if (is_tty) { printf("sahc> "); fflush(stdout); }
+        if (!fgets(line, sizeof(line), stdin)) break;  /* EOF */
+
+        size_t l = strlen(line);
+        while (l > 0 && (line[l-1] == '\n' || line[l-1] == '\r' ||
+                         line[l-1] == ' '  || line[l-1] == '\t')) {
+            line[--l] = 0;
+        }
+        if (l == 0) continue;
+
+        char* tokens[8] = {0};
+        int   n_tok = 0;
+        char* tok = strtok(line, " \t");
+        while (tok && n_tok < 8) { tokens[n_tok++] = tok; tok = strtok(NULL, " \t"); }
+        if (n_tok == 0) continue;
+
+        if (!strcmp(tokens[0], "quit") || !strcmp(tokens[0], "exit") ||
+            !strcmp(tokens[0], "q")) {
+            return 0;
+        }
+        if (!strcmp(tokens[0], "help") || !strcmp(tokens[0], "h") ||
+            !strcmp(tokens[0], "?")) {
+            print_repl_help();
+            continue;
+        }
+        if (!strcmp(tokens[0], "upload")) {
+            if (n_tok < 2) { fprintf(stderr, "usage: upload <csv_path>\n"); continue; }
+            int rc = do_upload(fd, seq_send, seq_recv, key, iv_prefix, tokens[1]);
+            if (rc < 0) return -1;
+            continue;
+        }
+        if (!strcmp(tokens[0], "query")) {
+            if (n_tok < 3) {
+                fprintf(stderr, "usage: query <field> <op> [diag]\n");
+                continue;
+            }
+            int f = parse_field(tokens[1]);
+            int o = parse_op(tokens[2]);
+            int d = (n_tok >= 4) ? parse_diag(tokens[3]) : -1;
+            if (f < 0 || o < 0 || d == -2) {
+                fprintf(stderr, "query: bad args (try 'help')\n");
+                continue;
+            }
+            int rc = do_query(fd, seq_send, seq_recv, key, iv_prefix,
+                              f, o, d,
+                              tokens[1], tokens[2],
+                              (n_tok >= 4) ? tokens[3] : NULL);
+            if (rc < 0) return -1;
+            continue;
+        }
+        fprintf(stderr, "unknown: %s (try 'help')\n", tokens[0]);
+    }
+    return 0;  /* EOF */
+}
+
 int main(int argc, char** argv)
 {
     const char* host     = SAHC_DEFAULT_HOST;
     int         port     = SAHC_DEFAULT_PORT;
     const char* party_id = "hosp-santa-maria";
-    const char* csv_path = NULL;        /* if set, UPLOAD after handshake */
+    const char* csv_path = NULL;   /* argv[4]; "-" or NULL = skip UPLOAD */
+    const char* q_field  = NULL;   /* argv[5]; if set, send a QUERY */
+    const char* q_op     = NULL;   /* argv[6] */
+    const char* q_diag   = NULL;   /* argv[7]; default "any" */
     if (argc >= 2) host = argv[1];
     if (argc >= 3) port = atoi(argv[2]);
     if (argc >= 4) party_id = argv[3];
-    if (argc >= 5) csv_path = argv[4];
+    if (argc >= 5 && strcmp(argv[4], "-") != 0) csv_path = argv[4];
+    if (argc >= 6) q_field = argv[5];
+    if (argc >= 7) q_op    = argv[6];
+    if (argc >= 8) q_diag  = argv[7];
+
+    int q_field_id = -1, q_op_id = -1, q_diag_id = -1;
+    if (q_field != NULL) {
+        q_field_id = parse_field(q_field);
+        q_op_id    = parse_op(q_op);
+        q_diag_id  = parse_diag(q_diag);
+        if (q_field_id < 0 || q_op_id < 0 || q_diag_id == -2) {
+            fprintf(stderr,
+                "Client: bad query args. Usage: <field> <op> [diag]\n"
+                "  field: age | temperature | blood_sugar\n"
+                "  op:    avg | min | max | count\n"
+                "  diag:  any | healthy | diabetes | hypertension | infection\n");
+            return 2;
+        }
+    }
 
     size_t id_len = strlen(party_id);
     if (id_len == 0 || id_len > 63) {
@@ -278,60 +543,32 @@ int main(int argc, char** argv)
     /* Per-session AEAD counters (start at 0; sf_send/sf_recv pre-increment). */
     uint64_t seq_send = 0, seq_recv = 0;
 
-    /* Optional UPLOAD: only if a CSV path was supplied. The server enforces
-     * role==HOSPITAL inside the enclave; we send regardless, so the
-     * researcher path also exercises that rejection (E_UNAUTHORIZED). */
+    /* Single-shot mode: argv[4]=csv_path or argv[5..7]=query. If neither
+     * is given, drop into the REPL after the handshake so the researcher
+     * (or anyone) can issue several commands on the same session. */
+    int single_shot = (csv_path != NULL) || (q_field != NULL);
+
     if (csv_path != NULL) {
-        PatientRecord recs[MAX_CLIENT_RECORDS];
-        int n = csv_load(csv_path, recs, MAX_CLIENT_RECORDS);
-        if (n < 0) {
-            fprintf(stderr, "Client: csv_load failed for %s\n", csv_path);
+        if (do_upload(fd, &seq_send, &seq_recv, session_key, iv_prefix,
+                      csv_path) < 0) {
             memset(session_key, 0, sizeof(session_key));
             identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
         }
-        if (n == 0) {
-            fprintf(stderr, "Client: %s has no parseable rows\n", csv_path);
-            memset(session_key, 0, sizeof(session_key));
-            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
-        }
+    }
 
-        printf("Client: sending UPLOAD with %d records from %s\n",
-               n, csv_path);
-        if (sf_send(fd, MSG_UPLOAD, &seq_send, session_key, iv_prefix,
-                    (const uint8_t*)recs,
-                    (uint32_t)(n * (int)sizeof(PatientRecord))) != 0) {
-            fprintf(stderr, "Client: sf_send(UPLOAD) failed\n");
+    if (q_field != NULL) {
+        if (do_query(fd, &seq_send, &seq_recv, session_key, iv_prefix,
+                     q_field_id, q_op_id, q_diag_id,
+                     q_field, q_op, q_diag) < 0) {
             memset(session_key, 0, sizeof(session_key));
             identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
         }
+    }
 
-        uint8_t  ack_pt[64];
-        uint32_t ack_len = 0;
-        uint8_t  ack_type = 0;
-        if (sf_recv(fd, &seq_recv, session_key, iv_prefix, &ack_type,
-                    ack_pt, sizeof(ack_pt), &ack_len) != 0) {
-            fprintf(stderr, "Client: sf_recv(UPLOAD_ACK) failed\n");
-            memset(session_key, 0, sizeof(session_key));
-            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+    if (!single_shot) {
+        if (repl_loop(fd, &seq_send, &seq_recv, session_key, iv_prefix) < 0) {
+            fprintf(stderr, "Client: session torn down by AEAD failure\n");
         }
-        if (ack_type == MSG_ERROR && ack_len >= 2) {
-            uint16_t code = ((uint16_t)ack_pt[0] << 8) | ack_pt[1];
-            fprintf(stderr, "Client: UPLOAD rejected, server ERROR code=%u\n",
-                    code);
-            memset(session_key, 0, sizeof(session_key));
-            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
-        }
-        if (ack_type != MSG_UPLOAD_ACK || ack_len != 4) {
-            fprintf(stderr, "Client: bad UPLOAD_ACK (type=0x%02x len=%u)\n",
-                    ack_type, ack_len);
-            memset(session_key, 0, sizeof(session_key));
-            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
-        }
-        uint32_t accepted = (uint32_t)ack_pt[0]
-                          | ((uint32_t)ack_pt[1] << 8)
-                          | ((uint32_t)ack_pt[2] << 16)
-                          | ((uint32_t)ack_pt[3] << 24);
-        printf("Client: UPLOAD_ACK records_accepted=%u\n", accepted);
     }
 
     memset(session_key, 0, sizeof(session_key));
