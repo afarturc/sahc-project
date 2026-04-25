@@ -138,6 +138,8 @@ Num terminal:
 
 No primeiro arranque o servidor lê `authorized_parties.json` e cria `data/sealed/state.bin`. Em arranques seguintes faz unseal direto desse blob (parties + registos sobrevivem).
 
+O servidor é concorrente: cada conexão é servida por uma thread dedicada (`pthread`) e o enclave aceita até `MAX_SESSIONS=8` sessões simultâneas (`TCSNum=8`). Múltiplos clientes podem estar em REPL ao mesmo tempo; UPLOADs concorrentes serializam apenas no `seal+write` para preservar a ordem do blob em disco.
+
 Noutro terminal — modo REPL (recomendado):
 
 ```bash
@@ -156,6 +158,14 @@ Modo single-shot (útil para scripting):
 
 # query (csv_path = "-" salta o upload)
 ./sgx_client 127.0.0.1 7878 fcup-research - blood_sugar avg diabetes
+```
+
+Demo de duas sessões em simultâneo (com o servidor a correr noutro terminal):
+
+```bash
+./sgx_client 127.0.0.1 7878 hosp-santa-maria &      # REPL hospital
+./sgx_client 127.0.0.1 7878 fcup-research          # REPL investigador
+# no log do servidor aparecem handles 1 e 2 atribuídos em paralelo
 ```
 
 Argumentos do REPL:
@@ -180,7 +190,7 @@ Códigos: `0` healthy, `1` diabetes, `2` hypertension, `3` infection.
 
 - **MRENCLAVE pinned hardcoded** no cliente (`EXPECTED_MRENCLAVE` em `Client/client_main.cpp`). Em produção é lido do `.signed.so`.
 - **Quote DCAP simulado**: a assinatura QE não é validada contra a raiz Intel. A Fase 4 do plano endereça isto (em hardware real Azure DCsv3 — bloqueado por quota na nossa subscrição Students; ver `PLANO_FINAL.md`).
-- **Servidor single-threaded**: aceita uma conexão de cada vez. Multi-sessão concorrente está em `PLANO_FINAL.md` Passo 3.
+- **Sem cap de conexões simultâneas no servidor**: a 9ª sessão concorrente apanha `E_INTERNAL` (slot exhaustion) — comportamento correcto mas não elegante.
 - **Sem revogação dinâmica**: para remover uma party é preciso editar o JSON e remover `data/sealed/state.bin` para forçar reload.
 
 ## Stack

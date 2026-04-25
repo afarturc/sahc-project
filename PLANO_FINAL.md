@@ -112,21 +112,6 @@ IV = `iv_prefix (4) || seq (8, BE)` — 12 bytes. AAD = cabeçalho do frame.
 
 **Critério Fase 2**: dois clientes (hospital + investigador) atestam, estabelecem sessões independentes, o hospital faz upload, o investigador faz query agregada, resultados corretos e k-anon enforced. Sealing sobrevive a restart.
 
-| # | Passo | Esforço |
-|---|---|---|
-| 1 | Scaffolding: `Include/{protocol,party}.h`, `Common/{framing,tcp_util}`, `Server/`, `Client/`, Makefile 3 targets. Hello round-trip TCP. | 1–2h |
-| 2 | Servidor TCP + dispatcher (sem crypto); cliente envia `ATTEST_REQ`, recebe `ATTEST_RESP`. | 2–3h |
-| 3 | Multi-sessão no enclave: `SessionContext[]` indexado por handle. | 3–4h |
-| 4a | Loader de `authorized_parties.json` com verificação de quórum. | 2–3h |
-| 4b | ECDH + identidade + canal seguro: AES-256-GCM, HKDF, assinatura ECDSA do cliente verificada pelo enclave. | 5–8h |
-| 5 | Enforcement role-based (HOSPITAL pode upload+query; RESEARCHER só query). | 1–2h |
-| 6 | Sealing + persistência (parties + registos) → migração transparente entre reinícios. | 3–4h |
-| 7 | K-anonymity threshold = 5 em todas as queries. | 30min |
-| 8 | Robustecimento (timeouts, backpressure, erros) + benchmarks locais. | 3–4h |
-| 9 | Smoke test em hardware real na Azure (ainda sem DCAP). | 3h |
-
-**Critério Fase 2**: dois clientes (hospital + investigador) atestam, estabelecem sessões independentes, o hospital faz upload, o investigador faz query agregada, resultados corretos e k-anon enforced. Sealing sobrevive a restart.
-
 ### Fase 3 — Gramine + DuckDB
 
 | # | Passo | Esforço |
