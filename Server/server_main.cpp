@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,20 @@ void ocall_print_string(const char* str) { printf("%s", str); }
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_sigint(int) { g_stop = 1; }
+
+/* Concurrency primitives for one-thread-per-connection serving.
+ *
+ *  - state_mutex serialises seal+write so two concurrent UPLOADs can
+ *    never reorder the on-disk blob vs the in-enclave state. The
+ *    enclave already serialises mutations internally via its own
+ *    sessions_mutex; this lock only exists to keep the host-side
+ *    "ecall_seal_state → write_file_atomic" pair atomic.
+ *  - active_mutex/active_cv let the main thread wait for in-flight
+ *    connections to drain before tearing down the enclave on shutdown. */
+static pthread_mutex_t state_mutex  = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t active_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  active_cv    = PTHREAD_COND_INITIALIZER;
+static int             active_conns = 0;
 
 /* ---------- Sealed state I/O ----------
  *
@@ -77,19 +92,28 @@ static int write_file_atomic(const char* path, const char* tmp,
 
 static int persist_state(sgx_enclave_id_t eid)
 {
+    /* Lock spans the seal ECALL and the file write so concurrent
+     * persists from two upload threads serialise as whole pairs —
+     * otherwise the on-disk blob could end up reflecting an older
+     * snapshot than the one the most recent UPLOAD_ACK promised. */
+    pthread_mutex_lock(&state_mutex);
+
     uint8_t blob[SEAL_BUF_CAP];
     size_t  blob_len = 0;
     int     rc = 0;
     sgx_status_t s = ecall_seal_state(eid, &rc, blob, sizeof(blob), &blob_len);
     if (s != SGX_SUCCESS || rc != 0) {
         fprintf(stderr, "Server: ecall_seal_state failed (s=0x%x rc=%d)\n", s, rc);
+        pthread_mutex_unlock(&state_mutex);
         return -1;
     }
     if (write_file_atomic(SEALED_FILE, SEALED_TMP, blob, blob_len) != 0) {
         fprintf(stderr, "Server: failed to write %s (%s)\n",
                 SEALED_FILE, strerror(errno));
+        pthread_mutex_unlock(&state_mutex);
         return -1;
     }
+    pthread_mutex_unlock(&state_mutex);
     printf("Server: state persisted (%zu bytes)\n", blob_len);
     return 0;
 }
@@ -366,6 +390,27 @@ static void close_session_if_open(sgx_enclave_id_t eid, uint32_t* handle)
     *handle = 0;
 }
 
+typedef struct {
+    sgx_enclave_id_t eid;
+    int              fd;
+} ConnArgs;
+
+static void serve_connection(sgx_enclave_id_t eid, int conn_fd);
+
+static void* conn_thread(void* arg)
+{
+    ConnArgs* a = (ConnArgs*)arg;
+    serve_connection(a->eid, a->fd);
+    close(a->fd);
+    free(a);
+
+    pthread_mutex_lock(&active_mutex);
+    active_conns--;
+    pthread_cond_broadcast(&active_cv);
+    pthread_mutex_unlock(&active_mutex);
+    return NULL;
+}
+
 static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
 {
     uint8_t  buf[RECV_BUF_CAP];
@@ -485,13 +530,51 @@ int main(int argc, char** argv)
         }
         /* 30 s idle on either direction kills the connection — protects
          * the server from a client that handshakes and never speaks
-         * again, and bounds how long a stuck send blocks the loop. */
+         * again, and bounds how long a stuck send blocks a worker. */
         tcp_set_timeout(conn_fd, 30, 30);
-        serve_connection(eid, conn_fd);
-        close(conn_fd);
+
+        ConnArgs* args = (ConnArgs*)malloc(sizeof(*args));
+        if (!args) {
+            fprintf(stderr, "Server: malloc(ConnArgs) failed — dropping conn\n");
+            close(conn_fd);
+            continue;
+        }
+        args->eid = eid;
+        args->fd  = conn_fd;
+
+        pthread_mutex_lock(&active_mutex);
+        active_conns++;
+        pthread_mutex_unlock(&active_mutex);
+
+        pthread_t tid;
+        int prc = pthread_create(&tid, NULL, conn_thread, args);
+        if (prc != 0) {
+            fprintf(stderr, "Server: pthread_create failed (rc=%d)\n", prc);
+            pthread_mutex_lock(&active_mutex);
+            active_conns--;
+            pthread_cond_broadcast(&active_cv);
+            pthread_mutex_unlock(&active_mutex);
+            close(conn_fd);
+            free(args);
+            continue;
+        }
+        pthread_detach(tid);
     }
 
     close(listen_fd);
+
+    /* Drain in-flight connections before destroying the enclave —
+     * sgx_destroy_enclave with active TCS would crash the workers. */
+    pthread_mutex_lock(&active_mutex);
+    if (active_conns > 0) {
+        printf("Server: waiting for %d in-flight connection(s) to drain\n",
+               active_conns);
+    }
+    while (active_conns > 0) {
+        pthread_cond_wait(&active_cv, &active_mutex);
+    }
+    pthread_mutex_unlock(&active_mutex);
+
     sgx_destroy_enclave(eid);
     printf("Server: shutdown\n");
     return 0;
