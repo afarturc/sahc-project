@@ -175,3 +175,64 @@ poc/
 ## 9. Próximo Passo Imediato
 
 **Passo 1 (scaffolding)** — reorganizar para `Server/`/`Client/`/`Common/`, criar `Include/{protocol,party}.h` já com 2 roles, fazer hello round-trip TCP sem crypto, enclave.signed.so continua a ser build target.
+
+## 10. Tolerância a Falhas e Recuperação
+
+Postura adoptada por classe de falha. *Handle* = tratado em código com semântica definida. *Fail-stop* = aborta limpo, exige intervenção do operador. *Out-of-scope* = aceite como limitação do protótipo, documentado.
+
+### 10.1 Falhas de transporte
+
+| Cenário | Postura | Mecanismo |
+|---|---|---|
+| Cliente fecha mid-handshake | Handle | Servidor solta a sessão via `serve_connection` return → `close_session_if_open`. |
+| Cliente desliga sem `SESSION_CLOSE` (half-open) | Handle | `tcp_set_timeout` 30 s em ambos sentidos; `frame_recv` devolve erro → cleanup do slot. |
+| Servidor ido durante REPL do cliente | Fail-stop cliente | `frame_recv` apanha EOF; cliente sai com erro. Sem retry automático — utilizador relança. |
+| Disco cheio em `write_file_atomic` | Fail-stop conexão | `persist_state` falha → `E_INTERNAL` → conexão cai. Records não saem do enclave para o ACK até o seal succeder; admin liberta espaço e o cliente refaz upload. |
+
+### 10.2 Falhas criptográficas e de canal
+
+| Cenário | Postura | Mecanismo |
+|---|---|---|
+| AEAD `decrypt` falha (tag inválida, IV reutilizado) | Fail-stop conexão | `E_DECRYPT_FAIL` derruba o canal — chave assumida comprometida ou peer adversário. |
+| Replay de frames | Handle | `seq` monotónico por sentido, parte de IV; mesmo `seq` decifra com tag inválida → `E_DECRYPT_FAIL`. |
+| Replay de handshake | Handle | Nonce 16 B fresco em cada `ATTEST_REQ`, ligado a `report_data` no quote; replays apanham mismatch. |
+| Cliente envia ECDSA inválido | Handle | Slot fica `S_PENDING`, `kex_and_quote` rejeita, slot é wiped imediatamente. |
+| KEY_CONFIRM com MAC errado | Handle | Wipe do slot (constant-time compare), `E_BAD_SIGNATURE`. |
+| Quote com MRENCLAVE errado | Handle | Cliente compara contra `EXPECTED_MRENCLAVE` (gerado pelo build); abort imediato. |
+
+### 10.3 Falhas de autorização e quórum
+
+| Cenário | Postura | Mecanismo |
+|---|---|---|
+| RESEARCHER tenta UPLOAD | Handle | Enclave responde `E_UNAUTHORIZED`; sessão sobrevive (REPL continua válido). |
+| Researcher sem M assinaturas válidas | Handle | `parties_loader` rejeita no startup; entrada não entra em `parties[]`. |
+| Hospital com chave revogada | Out-of-scope | Sem revogação dinâmica nesta versão; admin remove do JSON e apaga `data/sealed/state.bin` para forçar reload. |
+
+### 10.4 Falhas do enclave e do estado persistente
+
+| Cenário | Postura | Mecanismo |
+|---|---|---|
+| Enclave crash (`sgx_status_t != SUCCESS`) | Fail-stop conexão | Conexão cai mas o enclave não é reiniciado dentro do mesmo processo — próximo accept volta a falhar. Operador relança `sgx_server`. |
+| `sgx_destroy_enclave` com threads activas | Handle | Drain `active_conns` via condvar antes de destroy. |
+| Sealed blob corrompido | Fail-stop arranque | Servidor aborta com mensagem clara; admin remove `data/sealed/state.bin` para fallback ao JSON. |
+| MRENCLAVE muda (rebuild do enclave) | Handle | Sealing key é MRENCLAVE-bound; unseal falha; servidor aborta com instrução de remoção do blob. Build seguinte regenera `Include/expected_mrenclave.h` automaticamente. |
+| Slot exhaustion (9ª sessão concorrente) | Handle | `session_reserve_locked` devolve -1; cliente apanha `E_INTERNAL`. *Limitação reconhecida — sem cap explícito ou error code dedicado.* |
+| Atomic seal write interrompido (kill no `rename`) | Handle | `write_file_atomic` usa `open(tmp)+write+fsync+rename`; se interrompido antes do rename, blob antigo permanece intacto. |
+
+### 10.5 Falhas de identidade e atestação
+
+| Cenário | Postura | Mecanismo |
+|---|---|---|
+| Cliente sem chave em `parties/<id>.key` | Fail-stop cliente | `identity_load_pem` falha; cliente sai antes do connect. |
+| Cliente envia party_id desconhecido | Handle | Enclave responde `E_UNKNOWN_PARTY`; slot é wiped. |
+| `report_data` no quote ≠ SHA256(nonce∥enclave_pub) | Handle | Cliente rejeita em `verify_report_binding`; abort imediato. |
+| DCAP signature chain inválida (HW) | Handle (HW) / Bypass-flag (SIM) | `quote_verify` faz reject quando `require_dcap=1`; em SIM emite warning e prossegue. |
+
+### 10.6 Limites reconhecidos (out-of-scope)
+
+- Não há reinício automático do enclave após crash. Em produção isto seria um supervisor (systemd, k8s) — fora do escopo do protótipo.
+- Sem mecanismo de revogação dinâmica de identidades.
+- Sem retry / circuit breaker no cliente; uma falha qualquer encerra o processo.
+- Sem limite explícito de conexões concorrentes — a 9ª apanha `E_INTERNAL` sem distinção semântica.
+- Sem rate limiting de handshakes (DoS via flood de `ATTEST_REQ` é trivial).
+- Sealing key é MRENCLAVE-bound, logo um upgrade do enclave perde todo o estado. Em produção usar-se-ia MRSIGNER ou um KMS externo para wrapping de chaves.
