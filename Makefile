@@ -31,11 +31,13 @@ Server_Cpp_Objects := $(Server_Cpp_Files:.cpp=.o)
 Server_C_Files := Common/third_party/cJSON.c
 Server_C_Objects := $(Server_C_Files:.c=.o)
 
-# --- Client (no enclave, pure TCP + crypto later) ---
-Client_C_Flags := $(Untrusted_C_Flags)
-Client_Link_Flags := -lpthread
+# --- Client (no enclave, OpenSSL for ECDSA/ECDH/HKDF) ---
+# OpenSSL 3 deprecated EC_KEY/EC_POINT/SHA256_* in favour of EVP-only
+# APIs; suppress those warnings — migration is tracked separately.
+Client_C_Flags := $(Untrusted_C_Flags) -Wno-deprecated-declarations
+Client_Link_Flags := -lpthread -lcrypto
 
-Client_Cpp_Files := Client/client_main.cpp \
+Client_Cpp_Files := Client/client_main.cpp Client/identity.cpp \
     Common/framing.cpp Common/tcp_util.cpp
 Client_Cpp_Objects := $(Client_Cpp_Files:.cpp=.o)
 

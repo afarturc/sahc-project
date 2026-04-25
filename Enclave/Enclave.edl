@@ -26,28 +26,29 @@ enclave {
             [out] uint32_t* rejected_count
         );
 
-        /* Session lifecycle */
-        public int ecall_open_session(
+        /* Attestation + ECDH key exchange (replaces ecall_open_session
+         * and ecall_generate_report). Allocates a session slot, verifies
+         * the client's long-term ECDSA signature against parties[], runs
+         * ECDH, derives session_key/iv_prefix via HKDF, and produces a
+         * quote whose user_data binds nonce to enclave_ecdh_pub. */
+        public int ecall_attest_begin(
             [in, count=id_len] uint8_t* party_id,
             size_t id_len,
-            [out] uint32_t* handle
-        );
-
-        public int ecall_close_session(uint32_t handle);
-
-        /* DCAP: gerar report para o Quoting Enclave */
-        public int ecall_generate_report(
-            uint32_t handle,
             [in, count=16] uint8_t* nonce,
+            [in, count=64] uint8_t* client_ecdh_pub,
+            [in, count=64] uint8_t* signature,
+            [out] uint32_t* handle,
+            [out, count=64] uint8_t* enclave_ecdh_pub,
             [out, count=32] uint8_t* mrenclave,
             [out, count=32] uint8_t* mrsigner,
             [out] uint16_t* isv_prod_id,
             [out] uint16_t* isv_svn,
             [out, count=32] uint8_t* user_data,
-            [out, count=64] uint8_t* signature,
+            [out, count=64] uint8_t* quote_sig,
             [out, count=32] uint8_t* qe_identity
         );
 
+        public int ecall_close_session(uint32_t handle);
     };
 
     untrusted {

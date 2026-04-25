@@ -5,7 +5,6 @@
 #include "parties_loader.h"
 #include "tcp_util.h"
 #include "protocol.h"
-#include "types.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -79,60 +78,54 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
         return -1;
     }
 
-    const uint8_t* party_id         = payload + 1;
-    const uint8_t* nonce            = party_id + id_len;
-    const uint8_t* client_ecdh_pub  = nonce + PROTO_NONCE_SIZE;
-    (void)client_ecdh_pub;  // signature verified at Passo 4b
-    (void)(nonce + PROTO_NONCE_SIZE + PROTO_ECDH_PUB_SIZE);  // signature
+    const uint8_t* party_id        = payload + 1;
+    const uint8_t* nonce           = party_id + id_len;
+    const uint8_t* client_ecdh_pub = nonce + PROTO_NONCE_SIZE;
+    const uint8_t* signature       = client_ecdh_pub + PROTO_ECDH_PUB_SIZE;
 
     printf("Server: ATTEST_REQ party=\"%.*s\"\n", (int)id_len, party_id);
 
-    int open_rc = 0;
-    sgx_status_t so = ecall_open_session(eid, &open_rc,
-                                         (uint8_t*)party_id, (size_t)id_len,
-                                         session_handle);
-    if (so != SGX_SUCCESS || open_rc != 0 || *session_handle == 0) {
-        fprintf(stderr, "Server: ecall_open_session failed (s=0x%x rc=%d)\n",
-                so, open_rc);
-        send_error(fd, E_INTERNAL);
-        return -1;
-    }
-    printf("Server: session handle=%u\n", *session_handle);
-
-    uint8_t  mrenclave[32];
-    uint8_t  mrsigner[32];
-    uint16_t isv_prod_id = 0;
-    uint16_t isv_svn     = 0;
-    uint8_t  user_data[USER_DATA_SIZE];
-    uint8_t  signature[QUOTE_SIGNATURE_SIZE];
+    uint8_t  enclave_ecdh_pub[PROTO_ECDH_PUB_SIZE];
+    uint8_t  mrenclave[32], mrsigner[32];
+    uint8_t  user_data[PROTO_QUOTE_USER_DATA_SIZE];
+    uint8_t  quote_sig[PROTO_QUOTE_SIG_SIZE];
     uint8_t  qe_identity[32];
+    uint16_t isv_prod_id = 0, isv_svn = 0;
 
-    int ret_status = 0;
-    sgx_status_t s = ecall_generate_report(eid, &ret_status,
-                                           *session_handle,
-                                           (uint8_t*)nonce,
-                                           mrenclave, mrsigner,
-                                           &isv_prod_id, &isv_svn,
-                                           user_data,
-                                           signature, qe_identity);
-    if (s != SGX_SUCCESS || ret_status != 0) {
-        fprintf(stderr, "Server: ecall_generate_report failed (s=0x%x rc=%d)\n",
-                s, ret_status);
+    int rc = 0;
+    sgx_status_t s = ecall_attest_begin(eid, &rc,
+        (uint8_t*)party_id, (size_t)id_len,
+        (uint8_t*)nonce, (uint8_t*)client_ecdh_pub, (uint8_t*)signature,
+        session_handle, enclave_ecdh_pub,
+        mrenclave, mrsigner, &isv_prod_id, &isv_svn,
+        user_data, quote_sig, qe_identity);
+    if (s != SGX_SUCCESS) {
+        fprintf(stderr, "Server: ecall_attest_begin SGX failure 0x%x\n", s);
         send_error(fd, E_INTERNAL);
         return -1;
     }
+    if (rc != 0) {
+        uint16_t wire = E_INTERNAL;
+        if      (rc == -1) wire = E_INVALID_STATE;
+        else if (rc == -2) wire = E_UNKNOWN_PARTY;
+        else if (rc == -3) wire = E_BAD_SIGNATURE;
+        fprintf(stderr, "Server: attest_begin failed rc=%d (wire=%u)\n",
+                rc, wire);
+        send_error(fd, wire);
+        return -1;
+    }
+    printf("Server: session handle=%u (KEX done)\n", *session_handle);
 
     uint8_t resp[PROTO_ATTEST_RESP_SIZE];
     uint8_t* p = resp;
-    memcpy(p, mrenclave,    32); p += 32;
-    memcpy(p, mrsigner,     32); p += 32;
-    put_u16_le(p, isv_prod_id);  p += 2;
-    put_u16_le(p, isv_svn);      p += 2;
-    memcpy(p, user_data,    32); p += 32;
-    memcpy(p, signature,    64); p += 64;
-    memcpy(p, qe_identity,  32); p += 32;
-    // enclave_ecdh_pub placeholder — real key kicks in at Passo 4b.
-    memset(p, 0, PROTO_ECDH_PUB_SIZE);
+    memcpy(p, mrenclave,        32); p += 32;
+    memcpy(p, mrsigner,         32); p += 32;
+    put_u16_le(p, isv_prod_id);      p += 2;
+    put_u16_le(p, isv_svn);          p += 2;
+    memcpy(p, user_data,        32); p += 32;
+    memcpy(p, quote_sig,        64); p += 64;
+    memcpy(p, qe_identity,      32); p += 32;
+    memcpy(p, enclave_ecdh_pub, PROTO_ECDH_PUB_SIZE);
 
     printf("Server: sending ATTEST_RESP (%u bytes)\n", PROTO_ATTEST_RESP_SIZE);
     return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SIZE);
