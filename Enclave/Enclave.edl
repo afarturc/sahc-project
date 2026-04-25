@@ -48,31 +48,6 @@ enclave {
             [out, count=32] uint8_t* qe_identity
         );
 
-        /* Key exchange apos attestation verificada */
-        public int ecall_finish_key_exchange(
-            uint32_t hospital_id,
-            [in, count=64] uint8_t* hospital_pub_key,
-            [out, count=16] uint8_t* session_key
-        );
-
-        /* Upload com chave de sessao */
-        public int ecall_upload_data(
-            uint32_t hospital_id,
-            [in, count=data_len] uint8_t* encrypted_data,
-            size_t data_len,
-            [in, count=12] uint8_t* iv,
-            [in, count=16] uint8_t* tag
-        );
-
-        /* Query */
-        public void ecall_run_query(
-            uint32_t field,
-            uint32_t query_type,
-            int32_t filter_diag,
-            [out] float* result_value,
-            [out] uint32_t* total_processed,
-            [out] uint32_t* total_matched
-        );
     };
 
     untrusted {

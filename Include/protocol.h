@@ -49,9 +49,9 @@
 #define PROTO_ECDH_PUB_SIZE 64
 #define PROTO_SIG_SIZE     64
 
-// ATTEST_RESP payload: serialized DCAPQuote followed by enclave_ecdh_pub(64).
+// ATTEST_RESP payload: serialized quote followed by enclave_ecdh_pub(64).
 //
-// Serialized DCAPQuote layout (little-endian, native):
+// Serialized quote layout (little-endian, native):
 //   mrenclave(32) | mrsigner(32) | isv_prod_id(2) | isv_svn(2)
 //   | user_data(32) | signature(64) | qe_identity(32)
 #define PROTO_QUOTE_MRENCLAVE_SIZE 32

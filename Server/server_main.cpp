@@ -203,7 +203,15 @@ int main(int argc, char** argv)
     if (argc >= 3) port = atoi(argv[2]);
 
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, on_sigint);
+
+    // sigaction (not signal()) so SIGINT does NOT carry SA_RESTART —
+    // otherwise accept() is auto-restarted on Ctrl+C and g_stop is never
+    // re-checked.
+    struct sigaction sa_int = {};
+    sa_int.sa_handler = on_sigint;
+    sigemptyset(&sa_int.sa_mask);
+    sa_int.sa_flags = 0;
+    sigaction(SIGINT, &sa_int, NULL);
 
     sgx_enclave_id_t eid = 0;
     if (init_enclave(&eid) != 0) return 1;
