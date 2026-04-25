@@ -48,6 +48,16 @@ enclave {
             [out, count=32] uint8_t* qe_identity
         );
 
+        /* Client proves possession of the derived session_key by sending
+         * HMAC-SHA256(session_key, "confirm"). On match the session
+         * transitions S_KEX_DONE -> S_READY and the role granted to the
+         * peer is returned. Mismatch wipes the slot back to S_FREE. */
+        public int ecall_key_confirm(
+            uint32_t handle,
+            [in, count=32] uint8_t* client_mac,
+            [out] uint8_t* assigned_role
+        );
+
         public int ecall_close_session(uint32_t handle);
     };
 

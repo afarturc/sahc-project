@@ -187,8 +187,8 @@ int main(int argc, char** argv)
     }
     printf("Client: user_data binding OK\n");
 
-    /* ECDH + HKDF. session_key/iv_prefix are derived but only used by
-     * KEY_CONFIRM and the AEAD frames in C3 of Passo 4b. */
+    /* ECDH + HKDF. session_key proves possession via KEY_CONFIRM below;
+     * iv_prefix is parked for the AEAD frames in Passo 5. */
     uint8_t shared[ID_SHARED_SIZE];
     if (ecdh_compute_shared(eph_priv, enclave_pub, shared) != 0) {
         fprintf(stderr, "Client: ECDH derive failed\n");
@@ -221,7 +221,53 @@ int main(int argc, char** argv)
         printf("\n");
     }
 
-    /* Wipe and clean up. KEY_CONFIRM/KEY_ACK arrive in C3. */
+    /* KEY_CONFIRM: prove possession of session_key via HMAC over "confirm".
+     * Server replies KEY_ACK with [status(1) | role(1)]. */
+    uint8_t mac[PROTO_KEY_CONFIRM_SIZE];
+    if (crypto_hmac_sha256(session_key, 32,
+                           (const uint8_t*)"confirm", 7, mac) != 0) {
+        fprintf(stderr, "Client: HMAC for KEY_CONFIRM failed\n");
+        memset(session_key, 0, sizeof(session_key));
+        identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+    }
+    if (frame_send(fd, MSG_KEY_CONFIRM, mac, PROTO_KEY_CONFIRM_SIZE) != 0) {
+        memset(session_key, 0, sizeof(session_key));
+        identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+    }
+
+    r = frame_recv(fd, &type, buf, sizeof(buf), &len);
+    if (r != 0) {
+        memset(session_key, 0, sizeof(session_key));
+        identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+    }
+    if (type == MSG_ERROR && len >= 2) {
+        uint16_t code = ((uint16_t)buf[0] << 8) | buf[1];
+        fprintf(stderr, "Client: KEY_CONFIRM rejected, server ERROR code=%u\n",
+                code);
+        memset(session_key, 0, sizeof(session_key));
+        identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+    }
+    if (type != MSG_KEY_ACK || len != PROTO_KEY_ACK_SIZE) {
+        fprintf(stderr, "Client: bad KEY_ACK (type=0x%02x len=%u)\n",
+                type, len);
+        memset(session_key, 0, sizeof(session_key));
+        identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+    }
+    {
+        uint8_t status = buf[0];
+        uint8_t role   = buf[1];
+        const char* role_str =
+            (role == PROTO_ROLE_HOSPITAL)   ? "HOSPITAL" :
+            (role == PROTO_ROLE_RESEARCHER) ? "RESEARCHER" : "?";
+        if (status != 0) {
+            fprintf(stderr, "Client: KEY_ACK status=%u (rejected)\n", status);
+            memset(session_key, 0, sizeof(session_key));
+            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+        }
+        printf("Client: KEY_ACK status=0 role=%s — session READY\n", role_str);
+    }
+
+    /* Wipe and clean up. AEAD frames (upload/query) arrive in Passo 5+. */
     memset(session_key, 0, sizeof(session_key));
     memset(iv_prefix,   0, sizeof(iv_prefix));
 

@@ -131,6 +131,52 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
     return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SIZE);
 }
 
+static int handle_key_confirm(sgx_enclave_id_t eid, int fd,
+                              const uint8_t* payload, uint32_t len,
+                              uint32_t* session_handle)
+{
+    if (*session_handle == 0) {
+        fprintf(stderr, "Server: KEY_CONFIRM with no open session\n");
+        send_error(fd, E_INVALID_STATE);
+        return -1;
+    }
+    if (len != PROTO_KEY_CONFIRM_SIZE) {
+        fprintf(stderr, "Server: KEY_CONFIRM bad size %u\n", len);
+        send_error(fd, E_INVALID_STATE);
+        return -1;
+    }
+
+    uint8_t role = 0;
+    int rc = 0;
+    sgx_status_t s = ecall_key_confirm(eid, &rc, *session_handle,
+                                       (uint8_t*)payload, &role);
+    if (s != SGX_SUCCESS) {
+        fprintf(stderr, "Server: ecall_key_confirm SGX failure 0x%x\n", s);
+        send_error(fd, E_INTERNAL);
+        return -1;
+    }
+    if (rc != 0) {
+        uint16_t wire = E_INTERNAL;
+        if      (rc == -1) wire = E_INVALID_STATE;
+        else if (rc == -2) wire = E_INVALID_STATE;
+        else if (rc == -3) wire = E_BAD_SIGNATURE;
+        fprintf(stderr, "Server: key_confirm rejected rc=%d (wire=%u)\n",
+                rc, wire);
+        send_error(fd, wire);
+        /* Enclave already wiped the slot on -2/-3/-5; reflect that. */
+        *session_handle = 0;
+        return -1;
+    }
+
+    printf("Server: session handle=%u READY (role=%u)\n",
+           *session_handle, role);
+
+    uint8_t ack[PROTO_KEY_ACK_SIZE];
+    ack[0] = 0;     /* status: OK */
+    ack[1] = role;  /* assigned role echoed back */
+    return frame_send(fd, MSG_KEY_ACK, ack, PROTO_KEY_ACK_SIZE);
+}
+
 static void close_session_if_open(sgx_enclave_id_t eid, uint32_t* handle)
 {
     if (*handle == 0) return;
@@ -170,6 +216,9 @@ static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
             break;
         case MSG_ATTEST_REQ:
             rc = handle_attest_req(eid, conn_fd, buf, len, &session_handle);
+            break;
+        case MSG_KEY_CONFIRM:
+            rc = handle_key_confirm(eid, conn_fd, buf, len, &session_handle);
             break;
         case MSG_SESSION_CLOSE:
             printf("Server: SESSION_CLOSE received\n");

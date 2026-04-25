@@ -533,3 +533,74 @@ int ecall_attest_begin(uint8_t* party_id, size_t id_len,
     ocall_print_string("Enclave: KEX complete\n");
     return 0;
 }
+
+/* Constant-time equality. memcmp leaks the position of the first
+ * differing byte via timing — fine for parsing, not for MAC compare. */
+static int consttime_memeq(const uint8_t* a, const uint8_t* b, size_t n)
+{
+    uint8_t diff = 0;
+    for (size_t i = 0; i < n; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+static const uint8_t KEY_CONFIRM_MSG[] = "confirm";
+#define KEY_CONFIRM_MSG_LEN (sizeof(KEY_CONFIRM_MSG) - 1)
+
+/* Verifies the client's HMAC over "confirm" using session_key. On match
+ * the session moves to S_READY and the role granted to the peer is
+ * returned (caller propagates it to the wire as KEY_ACK).
+ *
+ * On any failure the slot is wiped — repeated bad MACs cannot be used
+ * to brute-force the key, since each attempt costs a fresh handshake.
+ *
+ * rc:  0=OK  -1=invalid args/handle  -2=invalid state  -3=MAC mismatch
+ *     -5=HMAC compute failure
+ */
+int ecall_key_confirm(uint32_t handle,
+                      uint8_t* client_mac,
+                      uint8_t* assigned_role)
+{
+    *assigned_role = 0;
+    if (client_mac == NULL) return -1;
+    if (handle == 0 || handle > MAX_SESSIONS) return -1;
+    uint32_t idx = handle - 1;
+
+    /* Snapshot the bits we need under lock; keep the lock held while
+     * computing the MAC so a concurrent close cannot wipe the key
+     * mid-HMAC. (sgx_hmac_sha256_msg is in-enclave and bounded.) */
+    sgx_thread_mutex_lock(&sessions_mutex);
+    if (sessions[idx].state != S_KEX_DONE) {
+        sgx_thread_mutex_unlock(&sessions_mutex);
+        ocall_print_string("Enclave: key_confirm - invalid state\n");
+        return -2;
+    }
+
+    uint8_t expected[32];
+    sgx_status_t s = sgx_hmac_sha256_msg(KEY_CONFIRM_MSG, KEY_CONFIRM_MSG_LEN,
+                                         sessions[idx].session_key,
+                                         SESSION_KEY_SIZE,
+                                         expected, 32);
+    if (s != SGX_SUCCESS) {
+        session_clear_locked(idx);
+        sgx_thread_mutex_unlock(&sessions_mutex);
+        memset(expected, 0, sizeof(expected));
+        ocall_print_string("Enclave: key_confirm - HMAC failed\n");
+        return -5;
+    }
+
+    if (!consttime_memeq(expected, client_mac, 32)) {
+        session_clear_locked(idx);
+        sgx_thread_mutex_unlock(&sessions_mutex);
+        memset(expected, 0, sizeof(expected));
+        ocall_print_string("Enclave: key_confirm - MAC mismatch\n");
+        return -3;
+    }
+    memset(expected, 0, sizeof(expected));
+
+    sessions[idx].state = S_READY;
+    *assigned_role = (uint8_t)sessions[idx].role;
+    sgx_thread_mutex_unlock(&sessions_mutex);
+
+    ocall_print_string("Enclave: KEY_CONFIRM OK, session ready\n");
+    return 0;
+}

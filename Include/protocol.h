@@ -63,4 +63,14 @@
 
 #define PROTO_ATTEST_RESP_SIZE     (PROTO_QUOTE_SIZE + PROTO_ECDH_PUB_SIZE)
 
+// KEY_CONFIRM payload: HMAC-SHA256(session_key, "confirm")
+#define PROTO_KEY_CONFIRM_SIZE 32
+
+// KEY_ACK payload: status(1) | assigned_role(1)
+#define PROTO_KEY_ACK_SIZE      2
+
+// Role values carried in KEY_ACK (mirror of PartyRole inside the enclave)
+#define PROTO_ROLE_HOSPITAL    1
+#define PROTO_ROLE_RESEARCHER  2
+
 #endif
