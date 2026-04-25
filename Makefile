@@ -65,9 +65,9 @@ all: sgx_server sgx_client enclave Include/expected_mrenclave.h
 
 # Auto-pin: extract MRENCLAVE from the freshly-signed enclave so the
 # client header matches what the enclave will report at handshake.
-# Depends on both the enclave (source of the measurement) and the
-# server binary (the runner that prints it).
-Include/expected_mrenclave.h: enclave.signed.so sgx_server_bin scripts/extract_mrenclave.sh
+# Reads the SIGSTRUCT directly via `sgx_sign dump` — no enclave runtime
+# needed, so the client can be cross-built on a machine without SGX.
+Include/expected_mrenclave.h: enclave.signed.so scripts/extract_mrenclave.sh
 	./scripts/extract_mrenclave.sh
 
 mrenclave: Include/expected_mrenclave.h
