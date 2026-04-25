@@ -83,6 +83,19 @@ enclave {
         );
 
         public int ecall_close_session(uint32_t handle);
+
+        /* Sealing — opaque MRENCLAVE-bound blob holding parties[] and
+         * all_records[] so the server can survive an enclave restart. */
+        public int ecall_seal_state(
+            [out, count=cap] uint8_t* blob,
+            size_t cap,
+            [out] size_t* out_len
+        );
+
+        public int ecall_unseal_state(
+            [in, count=blob_len] uint8_t* blob,
+            size_t blob_len
+        );
     };
 
     untrusted {

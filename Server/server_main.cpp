@@ -6,14 +6,24 @@
 #include "tcp_util.h"
 #include "protocol.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #define ENCLAVE_FILE "enclave.signed.so"
 #define PARTIES_FILE "authorized_parties.json"
+#define SEALED_DIR   "data/sealed"
+#define SEALED_FILE  "data/sealed/state.bin"
+#define SEALED_TMP   "data/sealed/state.bin.tmp"
+/* Seal blob caps out at sealed_size(sizeof(SealedStatePT)) — that struct
+ * is ~22.8 KB plaintext, so 64 KB leaves comfortable headroom. */
+#define SEAL_BUF_CAP (64 * 1024)
 /* 32 KB is comfortably above the largest UPLOAD frame the enclave will
  * accept (1024 records * 20 B = 20 KB plaintext + 36 B envelope). */
 #define RECV_BUF_CAP (32 * 1024)
@@ -22,6 +32,89 @@ void ocall_print_string(const char* str) { printf("%s", str); }
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_sigint(int) { g_stop = 1; }
+
+/* ---------- Sealed state I/O ----------
+ *
+ * The enclave is the single source of truth; this layer only moves an
+ * opaque blob between the enclave and disk. persist_state() is called
+ * after every state mutation (initial parties load + each successful
+ * upload). load_state() runs once at startup and falls back to the
+ * JSON parties loader if the blob is missing or stale. */
+
+static int read_file(const char* path, uint8_t* buf, size_t cap, size_t* out_len)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return (errno == ENOENT) ? 1 : -1;
+    size_t n = fread(buf, 1, cap, f);
+    int    eof = feof(f);
+    int    err = ferror(f);
+    fclose(f);
+    if (err || !eof) return -1;
+    *out_len = n;
+    return 0;
+}
+
+static int write_file_atomic(const char* path, const char* tmp,
+                             const uint8_t* buf, size_t len)
+{
+    mkdir(SEALED_DIR, 0700);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return -1;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            close(fd); unlink(tmp); return -1;
+        }
+        off += (size_t)n;
+    }
+    if (fsync(fd) < 0) { close(fd); unlink(tmp); return -1; }
+    close(fd);
+    if (rename(tmp, path) < 0) { unlink(tmp); return -1; }
+    return 0;
+}
+
+static int persist_state(sgx_enclave_id_t eid)
+{
+    uint8_t blob[SEAL_BUF_CAP];
+    size_t  blob_len = 0;
+    int     rc = 0;
+    sgx_status_t s = ecall_seal_state(eid, &rc, blob, sizeof(blob), &blob_len);
+    if (s != SGX_SUCCESS || rc != 0) {
+        fprintf(stderr, "Server: ecall_seal_state failed (s=0x%x rc=%d)\n", s, rc);
+        return -1;
+    }
+    if (write_file_atomic(SEALED_FILE, SEALED_TMP, blob, blob_len) != 0) {
+        fprintf(stderr, "Server: failed to write %s (%s)\n",
+                SEALED_FILE, strerror(errno));
+        return -1;
+    }
+    printf("Server: state persisted (%zu bytes)\n", blob_len);
+    return 0;
+}
+
+/* rc:  0=unsealed OK   1=no blob on disk   -1=blob present but unseal failed */
+static int try_load_sealed(sgx_enclave_id_t eid)
+{
+    uint8_t blob[SEAL_BUF_CAP];
+    size_t  blob_len = 0;
+    int rf = read_file(SEALED_FILE, blob, sizeof(blob), &blob_len);
+    if (rf == 1) return 1;
+    if (rf != 0) {
+        fprintf(stderr, "Server: read %s failed (%s)\n",
+                SEALED_FILE, strerror(errno));
+        return -1;
+    }
+    int rc = 0;
+    sgx_status_t s = ecall_unseal_state(eid, &rc, blob, blob_len);
+    if (s != SGX_SUCCESS || rc != 0) {
+        fprintf(stderr, "Server: ecall_unseal_state failed (s=0x%x rc=%d)\n", s, rc);
+        return -1;
+    }
+    printf("Server: state restored from %s (%zu bytes)\n", SEALED_FILE, blob_len);
+    return 0;
+}
 
 static int init_enclave(sgx_enclave_id_t* eid_out)
 {
@@ -213,6 +306,14 @@ static int handle_upload(sgx_enclave_id_t eid, int fd,
          * is a user-side error — keep the session alive for REPL retries. */
         return (wire == E_DECRYPT_FAIL) ? -1 : 0;
     }
+    /* Records committed inside the enclave — persist before acknowledging
+     * so a crash between ECALL and reply can never claim accepted records
+     * the disk doesn't reflect. Failure to persist tears down the
+     * connection (the client should retry against a clean snapshot). */
+    if (persist_state(eid) != 0) {
+        send_error(fd, E_INTERNAL);
+        return -1;
+    }
     return frame_send(fd, MSG_UPLOAD_ACK, resp, (uint32_t)resp_len);
 }
 
@@ -338,20 +439,35 @@ int main(int argc, char** argv)
     sgx_enclave_id_t eid = 0;
     if (init_enclave(&eid) != 0) return 1;
 
-    uint32_t n_hosp = 0, n_res = 0, n_rej = 0;
-    int pl = parties_load_into_enclave(eid, PARTIES_FILE,
-                                       &n_hosp, &n_res, &n_rej);
-    if (pl == -1) {
-        fprintf(stderr, "Server: %s not found — run scripts/gen_identity.py "
-                        "and scripts/build_authorized_parties.py first\n",
-                PARTIES_FILE);
-    } else if (pl != 0) {
-        fprintf(stderr, "Server: parties load failed (rc=%d)\n", pl);
-        sgx_destroy_enclave(eid);
-        return 1;
-    } else {
-        printf("Server: parties loaded — %u hospitals, %u researchers, "
-               "%u rejected\n", n_hosp, n_res, n_rej);
+    int sealed_rc = try_load_sealed(eid);
+    if (sealed_rc != 0) {
+        if (sealed_rc < 0) {
+            fprintf(stderr, "Server: sealed blob present but unusable — "
+                            "remove %s to fall back to %s\n",
+                    SEALED_FILE, PARTIES_FILE);
+            sgx_destroy_enclave(eid);
+            return 1;
+        }
+        uint32_t n_hosp = 0, n_res = 0, n_rej = 0;
+        int pl = parties_load_into_enclave(eid, PARTIES_FILE,
+                                           &n_hosp, &n_res, &n_rej);
+        if (pl == -1) {
+            fprintf(stderr, "Server: %s not found — run scripts/gen_identity.py "
+                            "and scripts/build_authorized_parties.py first\n",
+                    PARTIES_FILE);
+        } else if (pl != 0) {
+            fprintf(stderr, "Server: parties load failed (rc=%d)\n", pl);
+            sgx_destroy_enclave(eid);
+            return 1;
+        } else {
+            printf("Server: parties loaded — %u hospitals, %u researchers, "
+                   "%u rejected\n", n_hosp, n_res, n_rej);
+            if (persist_state(eid) != 0) {
+                fprintf(stderr, "Server: initial seal failed — aborting\n");
+                sgx_destroy_enclave(eid);
+                return 1;
+            }
+        }
     }
 
     int listen_fd = tcp_listen(host, port, 8);

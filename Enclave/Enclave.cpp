@@ -5,6 +5,8 @@
 #include "sgx_tcrypto.h"
 #include "sgx_thread.h"
 #include "sgx_trts.h"
+#include "sgx_tseal.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* ========== ENCLAVE IDENTITY (SIMULATED) ========== */
@@ -918,5 +920,125 @@ int ecall_query(uint32_t handle,
     if (erc != 0) return erc;
 
     ocall_print_string("Enclave: QUERY OK\n");
+    return 0;
+}
+
+/* ========== SEALING ==========
+ *
+ * Single MRENCLAVE-bound blob captures the durable enclave state —
+ * authorized parties + accumulated patient records — so the server can
+ * restart the enclave and resume without re-running the parties loader
+ * and without losing uploaded data. Sessions are NOT sealed (volatile
+ * by design: clients must re-attest after a restart). */
+
+#define SEAL_STATE_MAGIC   0x53414843u   /* "SAHC" */
+#define SEAL_STATE_VERSION 1u
+
+typedef struct {
+    uint32_t        magic;
+    uint32_t        version;
+    uint32_t        parties_count;
+    uint32_t        parties_quorum_m;
+    uint32_t        total_records;
+    uint32_t        _reserved;
+    AuthorizedParty parties[MAX_PARTIES];
+    PatientRecord   all_records[MAX_RECORDS_TOTAL];
+} SealedStatePT;
+
+/* Match what sgx_seal_data uses internally, but pin key policy to
+ * MRENCLAVE so a different build of the enclave (even by the same
+ * signer) cannot unseal. */
+static const sgx_attributes_t SEAL_ATTR_MASK = {
+    0xFF0000000000000BULL, 0x0
+};
+#define SEAL_MISC_MASK 0xF0000000u
+
+int ecall_seal_state(uint8_t* blob, size_t cap, size_t* out_len)
+{
+    if (out_len == NULL) return -1;
+    *out_len = 0;
+
+    uint32_t pt_size  = (uint32_t)sizeof(SealedStatePT);
+    uint32_t need     = sgx_calc_sealed_data_size(0, pt_size);
+    if (need == UINT32_MAX) return -2;
+    if (blob == NULL || cap < need) return -1;
+
+    SealedStatePT* pt = (SealedStatePT*)malloc(sizeof(SealedStatePT));
+    if (pt == NULL) return -2;
+    memset(pt, 0, sizeof(*pt));
+    pt->magic            = SEAL_STATE_MAGIC;
+    pt->version          = SEAL_STATE_VERSION;
+
+    sgx_thread_mutex_lock(&records_mutex);
+    pt->parties_count    = parties_count;
+    pt->parties_quorum_m = parties_quorum_m;
+    memcpy(pt->parties, parties, sizeof(parties));
+    pt->total_records = (uint32_t)total_records;
+    memcpy(pt->all_records, all_records, sizeof(all_records));
+    sgx_thread_mutex_unlock(&records_mutex);
+
+    sgx_status_t s = sgx_seal_data_ex(
+        SGX_KEYPOLICY_MRENCLAVE, SEAL_ATTR_MASK, SEAL_MISC_MASK,
+        0, NULL,
+        pt_size, (const uint8_t*)pt,
+        need, (sgx_sealed_data_t*)blob);
+
+    memset(pt, 0, sizeof(*pt));
+    free(pt);
+
+    if (s != SGX_SUCCESS) {
+        ocall_print_string("Enclave: sgx_seal_data_ex failed\n");
+        return -2;
+    }
+    *out_len = need;
+    ocall_print_string("Enclave: state sealed\n");
+    return 0;
+}
+
+int ecall_unseal_state(uint8_t* blob, size_t blob_len)
+{
+    if (blob == NULL || blob_len == 0) return -1;
+
+    sgx_sealed_data_t* sealed = (sgx_sealed_data_t*)blob;
+    uint32_t pt_size = sgx_get_encrypt_txt_len(sealed);
+    if (pt_size != (uint32_t)sizeof(SealedStatePT)) return -2;
+    if (sgx_get_add_mac_txt_len(sealed) != 0) return -2;
+
+    SealedStatePT* pt = (SealedStatePT*)malloc(sizeof(SealedStatePT));
+    if (pt == NULL) return -1;
+
+    uint32_t pt_out = pt_size;
+    sgx_status_t s = sgx_unseal_data(sealed, NULL, NULL,
+                                     (uint8_t*)pt, &pt_out);
+    if (s != SGX_SUCCESS || pt_out != pt_size) {
+        memset(pt, 0, sizeof(*pt));
+        free(pt);
+        ocall_print_string("Enclave: sgx_unseal_data failed\n");
+        return -1;
+    }
+
+    if (pt->magic   != SEAL_STATE_MAGIC ||
+        pt->version != SEAL_STATE_VERSION ||
+        pt->parties_count > MAX_PARTIES   ||
+        pt->total_records > MAX_RECORDS_TOTAL) {
+        memset(pt, 0, sizeof(*pt));
+        free(pt);
+        return -2;
+    }
+
+    sgx_thread_mutex_lock(&records_mutex);
+    parties_count    = pt->parties_count;
+    parties_quorum_m = pt->parties_quorum_m;
+    parties_rejected = 0;
+    parties_loading  = 0;
+    memcpy(parties, pt->parties, sizeof(parties));
+    total_records = pt->total_records;
+    memcpy(all_records, pt->all_records, sizeof(all_records));
+    sgx_thread_mutex_unlock(&records_mutex);
+
+    memset(pt, 0, sizeof(*pt));
+    free(pt);
+
+    ocall_print_string("Enclave: state unsealed\n");
     return 0;
 }
