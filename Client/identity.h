@@ -48,4 +48,25 @@ int crypto_hmac_sha256(const uint8_t* key, size_t key_len,
                        const uint8_t* msg, size_t msg_len,
                        uint8_t out[ID_HASH_SIZE]);
 
+#define ID_AES128_KEY_SIZE 16
+#define ID_AES_GCM_IV_SIZE 12
+#define ID_AES_GCM_TAG_SIZE 16
+
+/* AES-128-GCM. ct_out must be at least pt_len bytes. Returns 0 on success. */
+int crypto_aes128gcm_encrypt(const uint8_t key[ID_AES128_KEY_SIZE],
+                             const uint8_t iv[ID_AES_GCM_IV_SIZE],
+                             const uint8_t* aad, size_t aad_len,
+                             const uint8_t* pt, size_t pt_len,
+                             uint8_t* ct_out,
+                             uint8_t tag_out[ID_AES_GCM_TAG_SIZE]);
+
+/* Returns 0 on success, -1 on auth failure or any other error. pt_out must
+ * be at least ct_len bytes. */
+int crypto_aes128gcm_decrypt(const uint8_t key[ID_AES128_KEY_SIZE],
+                             const uint8_t iv[ID_AES_GCM_IV_SIZE],
+                             const uint8_t* aad, size_t aad_len,
+                             const uint8_t* ct, size_t ct_len,
+                             const uint8_t tag[ID_AES_GCM_TAG_SIZE],
+                             uint8_t* pt_out);
+
 #endif

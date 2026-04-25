@@ -14,7 +14,9 @@
 
 #define ENCLAVE_FILE "enclave.signed.so"
 #define PARTIES_FILE "authorized_parties.json"
-#define RECV_BUF_CAP 4096
+/* 32 KB is comfortably above the largest UPLOAD frame the enclave will
+ * accept (1024 records * 20 B = 20 KB plaintext + 36 B envelope). */
+#define RECV_BUF_CAP (32 * 1024)
 
 void ocall_print_string(const char* str) { printf("%s", str); }
 
@@ -177,6 +179,41 @@ static int handle_key_confirm(sgx_enclave_id_t eid, int fd,
     return frame_send(fd, MSG_KEY_ACK, ack, PROTO_KEY_ACK_SIZE);
 }
 
+static int handle_upload(sgx_enclave_id_t eid, int fd,
+                         const uint8_t* req, uint32_t req_len,
+                         uint32_t* session_handle)
+{
+    if (*session_handle == 0) {
+        fprintf(stderr, "Server: UPLOAD with no open session\n");
+        send_error(fd, E_INVALID_STATE);
+        return -1;
+    }
+
+    /* UPLOAD_ACK is tiny (4 B plaintext + 36 B envelope). */
+    uint8_t resp[64];
+    size_t  resp_len = 0;
+    int     rc       = 0;
+    sgx_status_t s = ecall_upload_records(eid, &rc, *session_handle,
+                                          (uint8_t*)req, req_len,
+                                          resp, sizeof(resp), &resp_len);
+    if (s != SGX_SUCCESS) {
+        fprintf(stderr, "Server: ecall_upload_records SGX failure 0x%x\n", s);
+        send_error(fd, E_INTERNAL);
+        return -1;
+    }
+    if (rc != 0) {
+        uint16_t wire = E_INTERNAL;
+        if      (rc == -2) wire = E_INVALID_STATE;
+        else if (rc == -7) wire = E_DECRYPT_FAIL;
+        else if (rc == -8) wire = E_UNAUTHORIZED;
+        else if (rc == -9) wire = E_INVALID_STATE;
+        fprintf(stderr, "Server: upload rejected rc=%d (wire=%u)\n", rc, wire);
+        send_error(fd, wire);
+        return -1;
+    }
+    return frame_send(fd, MSG_UPLOAD_ACK, resp, (uint32_t)resp_len);
+}
+
 static void close_session_if_open(sgx_enclave_id_t eid, uint32_t* handle)
 {
     if (*handle == 0) return;
@@ -219,6 +256,9 @@ static void serve_connection(sgx_enclave_id_t eid, int conn_fd)
             break;
         case MSG_KEY_CONFIRM:
             rc = handle_key_confirm(eid, conn_fd, buf, len, &session_handle);
+            break;
+        case MSG_UPLOAD:
+            rc = handle_upload(eid, conn_fd, buf, len, &session_handle);
             break;
         case MSG_SESSION_CLOSE:
             printf("Server: SESSION_CLOSE received\n");

@@ -259,3 +259,96 @@ int crypto_hkdf_expand(const uint8_t* prk, size_t prk_len,
     memset(t1, 0, sizeof(t1));
     return 0;
 }
+
+/* ========== AES-128-GCM via OpenSSL EVP ========== */
+
+int crypto_aes128gcm_encrypt(const uint8_t key[ID_AES128_KEY_SIZE],
+                             const uint8_t iv[ID_AES_GCM_IV_SIZE],
+                             const uint8_t* aad, size_t aad_len,
+                             const uint8_t* pt, size_t pt_len,
+                             uint8_t* ct_out,
+                             uint8_t tag_out[ID_AES_GCM_TAG_SIZE])
+{
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return -1;
+
+    int rc = -1;
+    int outl = 0;
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1) {
+        ssl_print_err("EncryptInit"); goto out;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            ID_AES_GCM_IV_SIZE, NULL) != 1) {
+        ssl_print_err("set IVLEN"); goto out;
+    }
+    if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) != 1) {
+        ssl_print_err("EncryptInit(key,iv)"); goto out;
+    }
+    if (aad_len > 0 &&
+        EVP_EncryptUpdate(ctx, NULL, &outl, aad, (int)aad_len) != 1) {
+        ssl_print_err("EncryptUpdate(aad)"); goto out;
+    }
+    if (pt_len > 0 &&
+        EVP_EncryptUpdate(ctx, ct_out, &outl, pt, (int)pt_len) != 1) {
+        ssl_print_err("EncryptUpdate(pt)"); goto out;
+    }
+    if (EVP_EncryptFinal_ex(ctx, ct_out + outl, &outl) != 1) {
+        ssl_print_err("EncryptFinal"); goto out;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
+                            ID_AES_GCM_TAG_SIZE, tag_out) != 1) {
+        ssl_print_err("get TAG"); goto out;
+    }
+    rc = 0;
+
+out:
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}
+
+int crypto_aes128gcm_decrypt(const uint8_t key[ID_AES128_KEY_SIZE],
+                             const uint8_t iv[ID_AES_GCM_IV_SIZE],
+                             const uint8_t* aad, size_t aad_len,
+                             const uint8_t* ct, size_t ct_len,
+                             const uint8_t tag[ID_AES_GCM_TAG_SIZE],
+                             uint8_t* pt_out)
+{
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return -1;
+
+    int rc = -1;
+    int outl = 0;
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1) {
+        ssl_print_err("DecryptInit"); goto out;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            ID_AES_GCM_IV_SIZE, NULL) != 1) {
+        ssl_print_err("set IVLEN"); goto out;
+    }
+    if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv) != 1) {
+        ssl_print_err("DecryptInit(key,iv)"); goto out;
+    }
+    if (aad_len > 0 &&
+        EVP_DecryptUpdate(ctx, NULL, &outl, aad, (int)aad_len) != 1) {
+        ssl_print_err("DecryptUpdate(aad)"); goto out;
+    }
+    if (ct_len > 0 &&
+        EVP_DecryptUpdate(ctx, pt_out, &outl, ct, (int)ct_len) != 1) {
+        ssl_print_err("DecryptUpdate(ct)"); goto out;
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
+                            ID_AES_GCM_TAG_SIZE, (void*)tag) != 1) {
+        ssl_print_err("set TAG"); goto out;
+    }
+    if (EVP_DecryptFinal_ex(ctx, pt_out + outl, &outl) != 1) {
+        /* Auth failure: do not log via ssl_print_err — caller decides. */
+        goto out;
+    }
+    rc = 0;
+
+out:
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}

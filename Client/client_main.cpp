@@ -1,5 +1,8 @@
+#include "csv_loader.h"
 #include "framing.h"
 #include "identity.h"
+#include "patient.h"
+#include "secure_frame.h"
 #include "tcp_util.h"
 #include "protocol.h"
 
@@ -9,7 +12,9 @@
 #include <string.h>
 #include <unistd.h>
 
-#define RECV_BUF_CAP 4096
+/* Sized to comfortably hold the largest UPLOAD/UPLOAD_ACK frame. */
+#define RECV_BUF_CAP (32 * 1024)
+#define MAX_CLIENT_RECORDS 1024
 
 static int read_random(uint8_t* out, size_t n)
 {
@@ -57,9 +62,11 @@ int main(int argc, char** argv)
     const char* host     = SAHC_DEFAULT_HOST;
     int         port     = SAHC_DEFAULT_PORT;
     const char* party_id = "hosp-santa-maria";
+    const char* csv_path = NULL;        /* if set, UPLOAD after handshake */
     if (argc >= 2) host = argv[1];
     if (argc >= 3) port = atoi(argv[2]);
     if (argc >= 4) party_id = argv[3];
+    if (argc >= 5) csv_path = argv[4];
 
     size_t id_len = strlen(party_id);
     if (id_len == 0 || id_len > 63) {
@@ -204,9 +211,9 @@ int main(int argc, char** argv)
     }
     memset(shared, 0, sizeof(shared));
 
-    uint8_t session_key[32];
+    uint8_t session_key[16];   /* AES-128-GCM */
     uint8_t iv_prefix[4];
-    if (crypto_hkdf_expand(prk, 32, "session-aes256", session_key, 32) != 0 ||
+    if (crypto_hkdf_expand(prk, 32, "session-aes128", session_key, 16) != 0 ||
         crypto_hkdf_expand(prk, 32, "iv-prefix",      iv_prefix,    4) != 0) {
         fprintf(stderr, "Client: HKDF-expand failed\n");
         memset(prk, 0, sizeof(prk));
@@ -216,7 +223,7 @@ int main(int argc, char** argv)
     printf("Client: session_key derived (sha256(key)[0..7]):");
     {
         uint8_t kh[32];
-        crypto_sha256(session_key, 32, kh);
+        crypto_sha256(session_key, 16, kh);
         for (int i = 0; i < 8; i++) printf(" %02x", kh[i]);
         printf("\n");
     }
@@ -224,7 +231,7 @@ int main(int argc, char** argv)
     /* KEY_CONFIRM: prove possession of session_key via HMAC over "confirm".
      * Server replies KEY_ACK with [status(1) | role(1)]. */
     uint8_t mac[PROTO_KEY_CONFIRM_SIZE];
-    if (crypto_hmac_sha256(session_key, 32,
+    if (crypto_hmac_sha256(session_key, 16,
                            (const uint8_t*)"confirm", 7, mac) != 0) {
         fprintf(stderr, "Client: HMAC for KEY_CONFIRM failed\n");
         memset(session_key, 0, sizeof(session_key));
@@ -253,12 +260,13 @@ int main(int argc, char** argv)
         memset(session_key, 0, sizeof(session_key));
         identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
     }
+    uint8_t assigned_role = 0;
     {
         uint8_t status = buf[0];
-        uint8_t role   = buf[1];
+        assigned_role  = buf[1];
         const char* role_str =
-            (role == PROTO_ROLE_HOSPITAL)   ? "HOSPITAL" :
-            (role == PROTO_ROLE_RESEARCHER) ? "RESEARCHER" : "?";
+            (assigned_role == PROTO_ROLE_HOSPITAL)   ? "HOSPITAL" :
+            (assigned_role == PROTO_ROLE_RESEARCHER) ? "RESEARCHER" : "?";
         if (status != 0) {
             fprintf(stderr, "Client: KEY_ACK status=%u (rejected)\n", status);
             memset(session_key, 0, sizeof(session_key));
@@ -267,7 +275,65 @@ int main(int argc, char** argv)
         printf("Client: KEY_ACK status=0 role=%s — session READY\n", role_str);
     }
 
-    /* Wipe and clean up. AEAD frames (upload/query) arrive in Passo 5+. */
+    /* Per-session AEAD counters (start at 0; sf_send/sf_recv pre-increment). */
+    uint64_t seq_send = 0, seq_recv = 0;
+
+    /* Optional UPLOAD: only if a CSV path was supplied. The server enforces
+     * role==HOSPITAL inside the enclave; we send regardless, so the
+     * researcher path also exercises that rejection (E_UNAUTHORIZED). */
+    if (csv_path != NULL) {
+        PatientRecord recs[MAX_CLIENT_RECORDS];
+        int n = csv_load(csv_path, recs, MAX_CLIENT_RECORDS);
+        if (n < 0) {
+            fprintf(stderr, "Client: csv_load failed for %s\n", csv_path);
+            memset(session_key, 0, sizeof(session_key));
+            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+        }
+        if (n == 0) {
+            fprintf(stderr, "Client: %s has no parseable rows\n", csv_path);
+            memset(session_key, 0, sizeof(session_key));
+            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+        }
+
+        printf("Client: sending UPLOAD with %d records from %s\n",
+               n, csv_path);
+        if (sf_send(fd, MSG_UPLOAD, &seq_send, session_key, iv_prefix,
+                    (const uint8_t*)recs,
+                    (uint32_t)(n * (int)sizeof(PatientRecord))) != 0) {
+            fprintf(stderr, "Client: sf_send(UPLOAD) failed\n");
+            memset(session_key, 0, sizeof(session_key));
+            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+        }
+
+        uint8_t  ack_pt[64];
+        uint32_t ack_len = 0;
+        uint8_t  ack_type = 0;
+        if (sf_recv(fd, &seq_recv, session_key, iv_prefix, &ack_type,
+                    ack_pt, sizeof(ack_pt), &ack_len) != 0) {
+            fprintf(stderr, "Client: sf_recv(UPLOAD_ACK) failed\n");
+            memset(session_key, 0, sizeof(session_key));
+            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+        }
+        if (ack_type == MSG_ERROR && ack_len >= 2) {
+            uint16_t code = ((uint16_t)ack_pt[0] << 8) | ack_pt[1];
+            fprintf(stderr, "Client: UPLOAD rejected, server ERROR code=%u\n",
+                    code);
+            memset(session_key, 0, sizeof(session_key));
+            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+        }
+        if (ack_type != MSG_UPLOAD_ACK || ack_len != 4) {
+            fprintf(stderr, "Client: bad UPLOAD_ACK (type=0x%02x len=%u)\n",
+                    ack_type, ack_len);
+            memset(session_key, 0, sizeof(session_key));
+            identity_free(eph_priv); identity_free(lt_key); close(fd); return 1;
+        }
+        uint32_t accepted = (uint32_t)ack_pt[0]
+                          | ((uint32_t)ack_pt[1] << 8)
+                          | ((uint32_t)ack_pt[2] << 16)
+                          | ((uint32_t)ack_pt[3] << 24);
+        printf("Client: UPLOAD_ACK records_accepted=%u\n", accepted);
+    }
+
     memset(session_key, 0, sizeof(session_key));
     memset(iv_prefix,   0, sizeof(iv_prefix));
 

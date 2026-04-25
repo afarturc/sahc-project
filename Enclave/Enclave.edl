@@ -58,6 +58,19 @@ enclave {
             [out] uint8_t* assigned_role
         );
 
+        /* HOSPITAL uploads encrypted PatientRecord[]. Server is pure
+         * transport: req is the full post-KEX envelope (seq||iv||ct||tag),
+         * resp is the encrypted UPLOAD_ACK envelope ready to wrap with
+         * frame_send. */
+        public int ecall_upload_records(
+            uint32_t handle,
+            [in, count=req_len] uint8_t* req,
+            size_t req_len,
+            [out, count=resp_cap] uint8_t* resp,
+            size_t resp_cap,
+            [out] size_t* resp_len
+        );
+
         public int ecall_close_session(uint32_t handle);
     };
 

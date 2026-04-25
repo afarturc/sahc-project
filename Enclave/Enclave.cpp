@@ -1,4 +1,7 @@
 #include "Enclave_t.h"
+#include "patient.h"
+#include "protocol.h"
+#include "secure_frame.h"
 #include "sgx_tcrypto.h"
 #include "sgx_thread.h"
 #include "sgx_trts.h"
@@ -253,7 +256,7 @@ static int hkdf_expand_block(const uint8_t* prk, size_t prk_len,
 /* ========== SESSION TABLE ========== */
 
 #define MAX_SESSIONS  8
-#define SESSION_KEY_SIZE 32
+#define SESSION_KEY_SIZE 16   /* AES-128-GCM via sgx_rijndael128GCM_* */
 #define IV_PREFIX_SIZE   4
 
 typedef enum {
@@ -357,7 +360,7 @@ static int kex_and_quote(uint8_t* nonce,
     memset(&shared, 0, sizeof(shared));
     if (s != SGX_SUCCESS) { memset(prk, 0, sizeof(prk)); return -7; }
 
-    if (hkdf_expand_block(prk, 32, "session-aes256", 14,
+    if (hkdf_expand_block(prk, 32, "session-aes128", 14,
                           session_key_out, SESSION_KEY_SIZE) != 0 ||
         hkdf_expand_block(prk, 32, "iv-prefix", 9,
                           iv_prefix_out, IV_PREFIX_SIZE) != 0) {
@@ -602,5 +605,220 @@ int ecall_key_confirm(uint32_t handle,
     sgx_thread_mutex_unlock(&sessions_mutex);
 
     ocall_print_string("Enclave: KEY_CONFIRM OK, session ready\n");
+    return 0;
+}
+
+/* ========== PATIENT RECORDS STORE ========== */
+
+#define MAX_RECORDS_TOTAL 1024
+
+static PatientRecord all_records[MAX_RECORDS_TOTAL];
+static size_t        total_records = 0;
+static sgx_thread_mutex_t records_mutex = SGX_THREAD_MUTEX_INITIALIZER;
+
+/* ========== AEAD HELPERS (per-session) ==========
+ *
+ * The session_key never leaves the enclave; the server is pure
+ * transport. session_decrypt_envelope parses an inbound envelope
+ * (seq||iv||ct||tag) for handle, validates seq monotonicity and IV
+ * binding, and decrypts to pt_out. session_encrypt_envelope produces an
+ * outbound envelope ready for the server to wrap with frame_send.
+ *
+ * Both helpers reach into SessionContext.seq_send / seq_recv. With the
+ * single-threaded server we'd be safe under any locking discipline;
+ * locks here are forward-looking for when threading lands. */
+
+static uint64_t read_u64_be_(const uint8_t* p)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | (uint64_t)p[i];
+    return v;
+}
+
+static void write_u64_be_(uint8_t* p, uint64_t v)
+{
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * (7 - i)));
+}
+
+/* rc:  0=OK  -1=invalid args  -2=invalid state  -7=decrypt fail/replay */
+static int session_decrypt_envelope(uint32_t handle,
+                                    uint8_t expected_type,
+                                    const uint8_t* env, size_t env_len,
+                                    uint8_t* pt_out, size_t pt_cap,
+                                    size_t* pt_len_out,
+                                    PartyRole* role_out)
+{
+    if (handle == 0 || handle > MAX_SESSIONS) return -1;
+    if (env == NULL || env_len < SF_PAYLOAD_OVERHEAD) return -1;
+
+    uint32_t idx = handle - 1;
+    sgx_thread_mutex_lock(&sessions_mutex);
+    if (sessions[idx].state != S_READY) {
+        sgx_thread_mutex_unlock(&sessions_mutex);
+        return -2;
+    }
+
+    uint8_t  key[SESSION_KEY_SIZE];
+    uint8_t  ivp[IV_PREFIX_SIZE];
+    uint64_t last_seq = sessions[idx].seq_recv;
+    PartyRole role    = sessions[idx].role;
+    memcpy(key, sessions[idx].session_key, SESSION_KEY_SIZE);
+    memcpy(ivp, sessions[idx].iv_prefix,   IV_PREFIX_SIZE);
+    sgx_thread_mutex_unlock(&sessions_mutex);
+
+    uint64_t seq = read_u64_be_(env);
+    if (seq <= last_seq) { memset(key, 0, sizeof(key)); return -7; }
+
+    uint8_t expected_iv[SF_IV_SIZE];
+    sf_build_iv(ivp, seq, expected_iv);
+    if (memcmp(env + SF_SEQ_SIZE, expected_iv, SF_IV_SIZE) != 0) {
+        memset(key, 0, sizeof(key));
+        return -7;
+    }
+
+    size_t ct_len = env_len - SF_PAYLOAD_OVERHEAD;
+    if (ct_len > pt_cap) { memset(key, 0, sizeof(key)); return -1; }
+
+    const uint8_t* ct  = env + SF_SEQ_SIZE + SF_IV_SIZE;
+    const uint8_t* tag = ct + ct_len;
+
+    uint8_t aad[SF_AAD_SIZE];
+    sf_build_aad(expected_type, seq, aad);
+
+    sgx_status_t s = sgx_rijndael128GCM_decrypt(
+        (sgx_aes_gcm_128bit_key_t*)key,
+        ct, (uint32_t)ct_len, pt_out,
+        expected_iv, SF_IV_SIZE,
+        aad, SF_AAD_SIZE,
+        (const sgx_aes_gcm_128bit_tag_t*)tag);
+    memset(key, 0, sizeof(key));
+    if (s != SGX_SUCCESS) return -7;
+
+    sgx_thread_mutex_lock(&sessions_mutex);
+    if (sessions[idx].state == S_READY) sessions[idx].seq_recv = seq;
+    sgx_thread_mutex_unlock(&sessions_mutex);
+
+    *pt_len_out = ct_len;
+    *role_out   = role;
+    return 0;
+}
+
+/* rc:  0=OK  -1=invalid args  -2=invalid state  -5=AEAD failure */
+static int session_encrypt_envelope(uint32_t handle,
+                                    uint8_t resp_type,
+                                    const uint8_t* pt, size_t pt_len,
+                                    uint8_t* env_out, size_t env_cap,
+                                    size_t* env_len_out)
+{
+    if (handle == 0 || handle > MAX_SESSIONS) return -1;
+    if (env_cap < SF_PAYLOAD_OVERHEAD + pt_len) return -1;
+
+    uint32_t idx = handle - 1;
+    sgx_thread_mutex_lock(&sessions_mutex);
+    if (sessions[idx].state != S_READY) {
+        sgx_thread_mutex_unlock(&sessions_mutex);
+        return -2;
+    }
+    uint64_t seq = sessions[idx].seq_send + 1;
+    sessions[idx].seq_send = seq;  /* commit early; if encrypt fails the
+                                    * burned seq is harmless — next send
+                                    * just uses seq+1. */
+    uint8_t key[SESSION_KEY_SIZE];
+    uint8_t ivp[IV_PREFIX_SIZE];
+    memcpy(key, sessions[idx].session_key, SESSION_KEY_SIZE);
+    memcpy(ivp, sessions[idx].iv_prefix,   IV_PREFIX_SIZE);
+    sgx_thread_mutex_unlock(&sessions_mutex);
+
+    write_u64_be_(env_out, seq);
+
+    uint8_t iv[SF_IV_SIZE];
+    sf_build_iv(ivp, seq, iv);
+    memcpy(env_out + SF_SEQ_SIZE, iv, SF_IV_SIZE);
+
+    uint8_t* ct  = env_out + SF_SEQ_SIZE + SF_IV_SIZE;
+    uint8_t* tag = ct + pt_len;
+
+    uint8_t aad[SF_AAD_SIZE];
+    sf_build_aad(resp_type, seq, aad);
+
+    sgx_status_t s = sgx_rijndael128GCM_encrypt(
+        (sgx_aes_gcm_128bit_key_t*)key,
+        pt, (uint32_t)pt_len, ct,
+        iv, SF_IV_SIZE,
+        aad, SF_AAD_SIZE,
+        (sgx_aes_gcm_128bit_tag_t*)tag);
+    memset(key, 0, sizeof(key));
+    if (s != SGX_SUCCESS) return -5;
+
+    *env_len_out = SF_PAYLOAD_OVERHEAD + pt_len;
+    return 0;
+}
+
+/* ========== UPLOAD ==========
+ *
+ * Plaintext format (HOSPITAL → enclave): packed PatientRecord[N], so
+ * pt_len must be a multiple of sizeof(PatientRecord).
+ *
+ * Plaintext response (enclave → HOSPITAL): u32 LE records_accepted.
+ *
+ * rc:  0=OK  -1=invalid args  -2=invalid state  -5=AEAD failure
+ *     -7=decrypt fail/replay  -8=role unauthorised  -9=malformed payload
+ */
+int ecall_upload_records(uint32_t handle,
+                         uint8_t* req, size_t req_len,
+                         uint8_t* resp, size_t resp_cap,
+                         size_t* resp_len_out)
+{
+    *resp_len_out = 0;
+
+    /* 20 KB worst-case plaintext (1024 records * 20 B). Stack is fine —
+     * enclave Stack is 256 KB per Enclave.config.xml. */
+    uint8_t pt_buf[MAX_RECORDS_TOTAL * sizeof(PatientRecord)];
+    size_t  pt_len = 0;
+    PartyRole role;
+
+    int rc = session_decrypt_envelope(handle, MSG_UPLOAD,
+                                      req, req_len,
+                                      pt_buf, sizeof(pt_buf), &pt_len,
+                                      &role);
+    if (rc != 0) return rc;
+
+    if (role != ROLE_HOSPITAL) {
+        memset(pt_buf, 0, pt_len);
+        ocall_print_string("Enclave: UPLOAD denied (role != HOSPITAL)\n");
+        return -8;
+    }
+    if (pt_len == 0 || (pt_len % sizeof(PatientRecord)) != 0) {
+        memset(pt_buf, 0, pt_len);
+        return -9;
+    }
+
+    size_t n = pt_len / sizeof(PatientRecord);
+    PatientRecord* recs = (PatientRecord*)pt_buf;
+
+    sgx_thread_mutex_lock(&records_mutex);
+    size_t available = (total_records < MAX_RECORDS_TOTAL)
+                     ? (MAX_RECORDS_TOTAL - total_records) : 0;
+    size_t accepted = (n <= available) ? n : available;
+    for (size_t i = 0; i < accepted; i++)
+        all_records[total_records + i] = recs[i];
+    total_records += accepted;
+    sgx_thread_mutex_unlock(&records_mutex);
+
+    memset(pt_buf, 0, pt_len);
+
+    uint8_t resp_pt[4];
+    uint32_t a = (uint32_t)accepted;
+    resp_pt[0] = (uint8_t)(a       & 0xFF);
+    resp_pt[1] = (uint8_t)((a >> 8) & 0xFF);
+    resp_pt[2] = (uint8_t)((a >> 16) & 0xFF);
+    resp_pt[3] = (uint8_t)((a >> 24) & 0xFF);
+
+    int erc = session_encrypt_envelope(handle, MSG_UPLOAD_ACK,
+                                       resp_pt, sizeof(resp_pt),
+                                       resp, resp_cap, resp_len_out);
+    if (erc != 0) return erc;
+
+    ocall_print_string("Enclave: UPLOAD persisted\n");
     return 0;
 }
