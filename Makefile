@@ -37,8 +37,8 @@ Server_C_Objects := $(Server_C_Files:.c=.o)
 Client_C_Flags := $(Untrusted_C_Flags) -Wno-deprecated-declarations
 Client_Link_Flags := -lpthread -lcrypto
 
-Client_Cpp_Files := Client/client_main.cpp Client/identity.cpp \
-    Client/secure_frame.cpp Client/csv_loader.cpp \
+Client_Cpp_Files := Client/client_main.cpp Client/session.cpp \
+    Client/identity.cpp Client/secure_frame.cpp Client/csv_loader.cpp \
     Common/framing.cpp Common/tcp_util.cpp
 Client_Cpp_Objects := $(Client_Cpp_Files:.cpp=.o)
 
