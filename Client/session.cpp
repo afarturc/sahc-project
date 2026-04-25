@@ -4,6 +4,7 @@
 #include "framing.h"
 #include "identity.h"
 #include "patient.h"
+#include "quote_verify.h"
 #include "secure_frame.h"
 #include "tcp_util.h"
 #include "protocol.h"
@@ -43,11 +44,6 @@ static void print_hex(const char* label, const uint8_t* data, size_t n)
     printf("  %s: ", label);
     for (size_t i = 0; i < n; i++) printf("%02x", data[i]);
     printf("\n");
-}
-
-static inline uint16_t get_u16_le(const uint8_t* p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
 static void write_u32_le(uint8_t* p, uint32_t v)
@@ -154,38 +150,23 @@ int client_session_open(const char* host, int port, const char* party_id,
     }
 
     {
-        const uint8_t* q = buf;
-        const uint8_t* mrenclave   = q;
-        const uint8_t* mrsigner    = mrenclave + 32;
-        uint16_t isv_prod_id = get_u16_le(mrsigner + 32);
-        uint16_t isv_svn     = get_u16_le(mrsigner + 32 + 2);
-        const uint8_t* user_data   = mrsigner + 32 + 4;
-        const uint8_t* enclave_pub = user_data + 32 + 64 + 32;
-        (void)isv_prod_id; (void)isv_svn;
-
+        QuoteVerifyCtx vctx = {
+            buf, len, nonce, EXPECTED_MRENCLAVE, sahc_require_dcap()
+        };
+        QuoteVerifyOut vout;
         VLOG(verbose, "Client: ATTEST_RESP received (%u bytes)\n", len);
+
+        if (quote_verify(&vctx, &vout) != 0) goto fail;
+
         if (verbose) {
-            print_hex("mrenclave",   mrenclave, 32);
-            printf("  isv_prod_id: %u  isv_svn: %u\n", isv_prod_id, isv_svn);
-            print_hex("enclave_pub", enclave_pub, 16);
+            print_hex("mrenclave",   vout.mrenclave, 32);
+            printf("  isv_prod_id: %u  isv_svn: %u\n",
+                   vout.isv_prod_id, vout.isv_svn);
+            print_hex("enclave_pub", vout.enclave_ecdh_pub, 16);
+            printf("Client: quote verified (require_dcap=%d)\n", vctx.require_dcap);
         }
 
-        if (memcmp(mrenclave, EXPECTED_MRENCLAVE, 32) != 0) {
-            fprintf(stderr, "Client: MRENCLAVE MISMATCH (wrong enclave)\n");
-            goto fail;
-        }
-        VLOG(verbose, "Client: MRENCLAVE pin OK\n");
-
-        uint8_t to_hash[PROTO_NONCE_SIZE + PROTO_ECDH_PUB_SIZE];
-        memcpy(to_hash, nonce, PROTO_NONCE_SIZE);
-        memcpy(to_hash + PROTO_NONCE_SIZE, enclave_pub, PROTO_ECDH_PUB_SIZE);
-        uint8_t expected[ID_HASH_SIZE];
-        if (crypto_sha256(to_hash, sizeof(to_hash), expected) != 0 ||
-            memcmp(user_data, expected, ID_HASH_SIZE) != 0) {
-            fprintf(stderr, "Client: user_data mismatch (replay or tampered)\n");
-            goto fail;
-        }
-        VLOG(verbose, "Client: user_data binding OK\n");
+        const uint8_t* enclave_pub = vout.enclave_ecdh_pub;
 
         uint8_t shared[ID_SHARED_SIZE];
         if (ecdh_compute_shared(eph_priv, enclave_pub, shared) != 0) {

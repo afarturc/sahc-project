@@ -34,12 +34,20 @@ Server_C_Objects := $(Server_C_Files:.c=.o)
 # --- Client (no enclave, OpenSSL for ECDSA/ECDH/HKDF) ---
 # OpenSSL 3 deprecated EC_KEY/EC_POINT/SHA256_* in favour of EVP-only
 # APIs; suppress those warnings — migration is tracked separately.
-Client_C_Flags := $(Untrusted_C_Flags) -Wno-deprecated-declarations
+# SAHC_HW switches the default attestation policy: SIM tolerates the
+# missing DCAP signature chain, HW requires it (overridable at runtime
+# via SAHC_REQUIRE_DCAP=0|1).
+ifeq ($(SGX_MODE), HW)
+    Client_HW_Flag := -DSAHC_HW=1
+else
+    Client_HW_Flag := -DSAHC_HW=0
+endif
+Client_C_Flags := $(Untrusted_C_Flags) -Wno-deprecated-declarations $(Client_HW_Flag)
 Client_Link_Flags := -lpthread -lcrypto
 
 Client_Cpp_Files := Client/client_main.cpp Client/session.cpp \
-    Client/identity.cpp Client/secure_frame.cpp Client/csv_loader.cpp \
-    Common/framing.cpp Common/tcp_util.cpp
+    Client/quote_verify.cpp Client/identity.cpp Client/secure_frame.cpp \
+    Client/csv_loader.cpp Common/framing.cpp Common/tcp_util.cpp
 Client_Cpp_Objects := $(Client_Cpp_Files:.cpp=.o)
 
 # --- Enclave (trusted) ---
@@ -130,8 +138,8 @@ sgx_client_bin: $(Client_Cpp_Objects)
 	g++ $(Client_Cpp_Objects) -o sgx_client $(Client_Link_Flags)
 
 # --- Bench harness (reuses Client/session.* + crypto deps) ---
-Bench_Cpp_Files := Bench/bench.cpp Client/session.cpp Client/identity.cpp \
-    Client/secure_frame.cpp Client/csv_loader.cpp \
+Bench_Cpp_Files := Bench/bench.cpp Client/session.cpp Client/quote_verify.cpp \
+    Client/identity.cpp Client/secure_frame.cpp Client/csv_loader.cpp \
     Common/framing.cpp Common/tcp_util.cpp
 Bench_Cpp_Objects := $(Bench_Cpp_Files:.cpp=.o)
 
