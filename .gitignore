@@ -5,6 +5,9 @@
 app
 sgx_server
 sgx_client
+sgx_bench
+# bench output (regenerated per run)
+bench-*.md
 Enclave/Enclave_t.c
 Enclave/Enclave_t.h
 # SDK-generated stubs (if emitted into project root)
