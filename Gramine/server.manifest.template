@@ -1,0 +1,49 @@
+loader.entrypoint.uri = "file:{{ gramine.libos }}"
+libos.entrypoint = "/sahc/gramine_server"
+loader.log_level = "{{ log_level }}"
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
+loader.insecure__use_cmdline_argv = true
+loader.insecure__use_host_env = true
+
+# Workdir is inside the mounted project root so relative paths
+# (authorized_parties.json, data/sealed/) resolve correctly.
+loader.env.PWD = "/sahc"
+fs.start_dir = "/sahc"
+
+fs.mounts = [
+  { path = "/lib",                   uri = "file:{{ gramine.runtimedir() }}" },
+  { path = "{{ arch_libdir }}",      uri = "file:{{ arch_libdir }}" },
+  { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+  { path = "/usr/lib",               uri = "file:/usr/lib" },
+  { path = "/etc/ssl",               uri = "file:/etc/ssl" },
+  { path = "/sahc",                  uri = "file:{{ project_root }}" },
+]
+
+sys.enable_sigterm_injection = true
+
+sgx.debug = true
+sgx.edmm_enable = false
+sgx.enclave_size = "512M"
+sgx.max_threads = 16
+
+# Real DCAP attestation in gramine-sgx HW. On gramine-direct the
+# /dev/attestation/* pseudo-files are absent and the backend logs
+# warnings + falls back to dev placeholders.
+sgx.remote_attestation = "dcap"
+
+sgx.trusted_files = [
+  "file:{{ gramine.libos }}",
+  "file:{{ gramine.runtimedir() }}/",
+  "file:{{ arch_libdir }}/",
+  "file:/usr/{{ arch_libdir }}/",
+  "file:/usr/lib/",
+  "file:/etc/ssl/",
+  "file:{{ project_root }}/gramine_server",
+  "file:{{ project_root }}/authorized_parties.json",
+]
+
+# Sealed state file is mutable and machine-bound — not in trusted_files.
+sgx.allowed_files = [
+  "file:{{ project_root }}/data/sealed/",
+]

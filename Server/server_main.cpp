@@ -513,9 +513,41 @@ int main(int argc, char** argv)
             sgx_destroy_enclave(eid);
             return 1;
         }
+        /* Adapt the new callback-sink loader to the SDK ECALL surface.
+         * Each callback wraps the matching ecall_* with the boilerplate
+         * that translates sgx_status_t/rc into the sink's int convention. */
+        struct SgxSinkCtx { sgx_enclave_id_t eid; };
+        SgxSinkCtx sink_ctx = { eid };
+        PartiesSink sink = { &sink_ctx,
+            [](void* c, uint32_t q) -> int {
+                auto* s = (SgxSinkCtx*)c; int rc = 0;
+                sgx_status_t st = ecall_parties_begin(s->eid, &rc, q);
+                return (st != SGX_SUCCESS || rc != 0) ? -1 : 0;
+            },
+            [](void* c, uint8_t* id, size_t id_len, uint8_t* pub) -> int {
+                auto* s = (SgxSinkCtx*)c; int rc = 0;
+                sgx_status_t st = ecall_parties_add_hospital(s->eid, &rc,
+                                                             id, id_len, pub);
+                return (st != SGX_SUCCESS || rc != 0) ? -1 : 0;
+            },
+            [](void* c, uint8_t* id, size_t id_len, uint8_t* pub,
+               uint8_t* blob, size_t blob_len, uint32_t* accepted) -> int {
+                auto* s = (SgxSinkCtx*)c; int rc = 0;
+                sgx_status_t st = ecall_parties_add_researcher(s->eid, &rc,
+                                                               id, id_len, pub,
+                                                               blob, blob_len,
+                                                               accepted);
+                return (st != SGX_SUCCESS || rc != 0) ? -1 : 0;
+            },
+            [](void* c, uint32_t* h, uint32_t* r, uint32_t* rej) -> int {
+                auto* s = (SgxSinkCtx*)c; int rc = 0;
+                sgx_status_t st = ecall_parties_end(s->eid, &rc, h, r, rej);
+                return (st != SGX_SUCCESS || rc != 0) ? -1 : 0;
+            }
+        };
         uint32_t n_hosp = 0, n_res = 0, n_rej = 0;
-        int pl = parties_load_into_enclave(eid, PARTIES_FILE,
-                                           &n_hosp, &n_res, &n_rej);
+        int pl = parties_load_json(PARTIES_FILE, &sink,
+                                   &n_hosp, &n_res, &n_rej);
         if (pl == -1) {
             fprintf(stderr, "Server: %s not found — run scripts/gen_identity.py "
                             "and scripts/build_authorized_parties.py first\n",

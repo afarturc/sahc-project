@@ -53,7 +53,8 @@ Client_Cpp_Objects := $(Client_Cpp_Files:.cpp=.o)
 # --- Enclave (trusted) ---
 Enclave_C_Flags := $(SGX_COMMON_FLAGS) -nostdinc -fvisibility=hidden \
     -fpie -ffunction-sections -fdata-sections \
-    -IInclude -ICommon \
+    -DSAHC_BACKEND_SGX \
+    -IInclude -ICommon -IEnclaveLogic \
     -I$(SGX_SDK)/include \
     -I$(SGX_SDK)/include/tlibc \
     -I$(SGX_SDK)/include/libcxx
@@ -67,7 +68,7 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs \
     -Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
     -Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
-.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave
+.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave gramine_server gramine_manifest
 
 all: sgx_server sgx_client enclave Include/expected_mrenclave.h
 
@@ -105,9 +106,19 @@ Enclave/Enclave_t.o: Enclave/Enclave_t.c
 Enclave/Enclave.o: Enclave/Enclave.cpp Enclave/Enclave_t.c
 	g++ $(Enclave_C_Flags) -IEnclave -c Enclave/Enclave.cpp -o $@
 
-enclave.so: Enclave/Enclave.o Enclave/Enclave_t.o
-	g++ Enclave/Enclave.o Enclave/Enclave_t.o -o enclave.so -shared \
-		$(Enclave_Link_Flags)
+# EnclaveLogic — SDK-neutral logic + SGX backend implementations.
+Enclave_Logic_Cpp := EnclaveLogic/enclave_logic.cpp \
+    EnclaveLogic/crypto_backend_sgx.cpp \
+    EnclaveLogic/identity_backend_sgx.cpp \
+    EnclaveLogic/seal_backend_sgx.cpp
+Enclave_Logic_Obj := $(Enclave_Logic_Cpp:.cpp=.o)
+
+EnclaveLogic/%.o: EnclaveLogic/%.cpp
+	g++ $(Enclave_C_Flags) -c $< -o $@
+
+enclave.so: Enclave/Enclave.o Enclave/Enclave_t.o $(Enclave_Logic_Obj)
+	g++ Enclave/Enclave.o Enclave/Enclave_t.o $(Enclave_Logic_Obj) \
+		-o enclave.so -shared $(Enclave_Link_Flags)
 
 enclave.signed.so: enclave.so
 	$(SGX_SDK)/bin/x64/sgx_sign sign -key Enclave/Enclave_private.pem \
@@ -149,9 +160,55 @@ Bench/%.o: Bench/%.cpp Include/expected_mrenclave.h
 sgx_bench_bin: $(Bench_Cpp_Objects)
 	g++ $(Bench_Cpp_Objects) -o sgx_bench $(Client_Link_Flags)
 
+# --- Gramine variant: same logic, OpenSSL + Gramine attestation backends.
+# Built standalone, no SGX SDK runtime; meant to run under
+# gramine-direct (smoke) or gramine-sgx (production).
+Gramine_C_Flags := $(SGX_COMMON_FLAGS) -fPIC -Wall -Wno-attributes \
+    -IInclude -ICommon -IServer -IEnclaveLogic
+Gramine_Link_Flags := -lpthread -lcrypto
+
+Gramine_Cpp_Files := Gramine/server_main.cpp \
+    EnclaveLogic/enclave_logic.cpp \
+    EnclaveLogic/crypto_backend_openssl.cpp \
+    EnclaveLogic/identity_backend_gramine.cpp \
+    EnclaveLogic/seal_backend_gramine.cpp \
+    Server/parties_loader.cpp \
+    Common/framing.cpp Common/tcp_util.cpp
+Gramine_Cpp_Objects := $(Gramine_Cpp_Files:.cpp=.gramine.o)
+Gramine_C_Objects   := Common/third_party/cJSON.gramine.o
+
+%.gramine.o: %.cpp
+	g++ $(Gramine_C_Flags) -c $< -o $@
+
+%.gramine.o: %.c
+	gcc $(Gramine_C_Flags) -c $< -o $@
+
+gramine_server: $(Gramine_Cpp_Objects) $(Gramine_C_Objects)
+	g++ $(Gramine_Cpp_Objects) $(Gramine_C_Objects) -o gramine_server \
+		$(Gramine_Link_Flags)
+
+# Render the manifest with substitutions; sign for gramine-sgx so HW runs
+# work too (gramine-direct only needs the unsigned .manifest). Run from
+# the project root so file:foo URIs resolve against the actual binary
+# and json paths.
+gramine_manifest: gramine_server Gramine/server.manifest.template
+	gramine-manifest \
+		-Dlog_level=error \
+		-Darch_libdir=/lib/x86_64-linux-gnu \
+		-Dproject_root=$(CURDIR) \
+		Gramine/server.manifest.template gramine_server.manifest
+	gramine-sgx-sign \
+		--manifest gramine_server.manifest \
+		--output   gramine_server.manifest.sgx \
+		|| echo "(gramine-sgx-sign skipped — fine if no signing key)"
+
 clean:
 	rm -f Server/*.o Client/*.o Bench/*.o Common/*.o Common/third_party/*.o \
-		Enclave/*.o *.o *.so \
-		sgx_server sgx_client sgx_bench \
+		Enclave/*.o EnclaveLogic/*.o Gramine/*.o *.o *.so \
+		Server/*.gramine.o EnclaveLogic/*.gramine.o Gramine/*.gramine.o \
+		Common/*.gramine.o Common/third_party/*.gramine.o \
+		sgx_server sgx_client sgx_bench gramine_server \
+		gramine_server.manifest gramine_server.manifest.sgx \
+		gramine_server.sig \
 		Enclave/Enclave_t.* Enclave_u.* \
 		Include/expected_mrenclave.h

@@ -182,6 +182,37 @@ static int verify_report_binding(const QuoteVerifyCtx* ctx,
 static int verify_enclave_identity(const QuoteVerifyCtx* ctx,
                                    const uint8_t mrenclave[32])
 {
+    /* Dev override for the gramine_server smoke path: the server reports
+     * a different MRENCLAVE than the SGX-SDK enclave (different binary),
+     * so the build-time pin can't match. SAHC_EXPECTED_MRENCLAVE accepts
+     * a 64-hex-char override. Empty string disables the check entirely
+     * (use only when DCAP is also disabled). */
+    const char* env = getenv("SAHC_EXPECTED_MRENCLAVE");
+    if (env != NULL) {
+        if (env[0] == '\0') {
+            fprintf(stderr, "quote_verify: MRENCLAVE pin disabled via env\n");
+            return 0;
+        }
+        uint8_t override[32];
+        if (strlen(env) != 64) {
+            fprintf(stderr, "quote_verify: SAHC_EXPECTED_MRENCLAVE must be 64 hex chars\n");
+            return -1;
+        }
+        for (int i = 0; i < 32; i++) {
+            unsigned int b;
+            if (sscanf(env + 2*i, "%2x", &b) != 1) {
+                fprintf(stderr, "quote_verify: bad hex in SAHC_EXPECTED_MRENCLAVE\n");
+                return -1;
+            }
+            override[i] = (uint8_t)b;
+        }
+        if (memcmp(mrenclave, override, 32) != 0) {
+            fprintf(stderr, "quote_verify: MRENCLAVE mismatch vs env override\n");
+            return -1;
+        }
+        return 0;
+    }
+
     if (memcmp(mrenclave, ctx->expected_mrenclave, 32) != 0) {
         fprintf(stderr,
             "quote_verify: MRENCLAVE mismatch — wrong enclave binary\n");

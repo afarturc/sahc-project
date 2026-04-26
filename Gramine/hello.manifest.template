@@ -1,0 +1,24 @@
+loader.entrypoint.uri = "file:{{ gramine.libos }}"
+libos.entrypoint = "/bin/echo"
+loader.insecure__use_cmdline_argv = true
+
+loader.log_level = "{{ log_level }}"
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}"
+
+fs.mounts = [
+  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+  { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+  { path = "/bin/echo", uri = "file:/bin/echo" },
+]
+
+sgx.debug = true
+sgx.edmm_enable = false
+sgx.enclave_size = "256M"
+sgx.max_threads = 4
+
+sgx.trusted_files = [
+  "file:{{ gramine.libos }}",
+  "file:{{ gramine.runtimedir() }}/",
+  "file:{{ arch_libdir }}/",
+  "file:/bin/echo",
+]

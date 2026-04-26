@@ -1,5 +1,4 @@
 #include "parties_loader.h"
-#include "Enclave_u.h"
 #include "third_party/cJSON.h"
 
 #include <stdio.h>
@@ -50,7 +49,7 @@ static char* slurp(const char* path, size_t* len_out)
     return buf;
 }
 
-static int add_hospital(sgx_enclave_id_t eid, cJSON* h)
+static int add_hospital(PartiesSink* sink, cJSON* h)
 {
     cJSON* jid  = cJSON_GetObjectItemCaseSensitive(h, "id");
     cJSON* jpub = cJSON_GetObjectItemCaseSensitive(h, "pubkey");
@@ -69,20 +68,15 @@ static int add_hospital(sgx_enclave_id_t eid, cJSON* h)
         fprintf(stderr, "parties: hospital '%s' pubkey hex invalid\n", id);
         return -1;
     }
-
-    int rc = 0;
-    sgx_status_t s = ecall_parties_add_hospital(eid, &rc,
-                                                (uint8_t*)id, id_len,
-                                                pub);
-    if (s != SGX_SUCCESS || rc != 0) {
-        fprintf(stderr, "parties: ecall_parties_add_hospital('%s') "
-                        "failed (s=0x%x rc=%d)\n", id, s, rc);
+    int rc = sink->add_hospital(sink->ctx, (uint8_t*)id, id_len, pub);
+    if (rc != 0) {
+        fprintf(stderr, "parties: add_hospital('%s') sink rc=%d\n", id, rc);
         return -1;
     }
     return 0;
 }
 
-static int add_researcher(sgx_enclave_id_t eid, cJSON* r)
+static int add_researcher(PartiesSink* sink, cJSON* r)
 {
     cJSON* jid  = cJSON_GetObjectItemCaseSensitive(r, "id");
     cJSON* jpub = cJSON_GetObjectItemCaseSensitive(r, "pubkey");
@@ -110,7 +104,6 @@ static int add_researcher(sgx_enclave_id_t eid, cJSON* r)
         return -1;
     }
 
-    // Approvals blob: [u8 hid_len | hid | u8 sig[64]] repeated.
     size_t blob_cap = (size_t)n_app * (1 + PARTY_ID_MAX + PARTY_SIGNATURE_SIZE);
     uint8_t* blob = (uint8_t*)malloc(blob_cap);
     if (!blob) return -1;
@@ -140,16 +133,11 @@ static int add_researcher(sgx_enclave_id_t eid, cJSON* r)
     }
 
     uint32_t accepted = 0;
-    int rc = 0;
-    sgx_status_t s = ecall_parties_add_researcher(eid, &rc,
-                                                  (uint8_t*)id, id_len,
-                                                  pub,
-                                                  blob, off,
-                                                  &accepted);
+    int rc = sink->add_researcher(sink->ctx, (uint8_t*)id, id_len, pub,
+                                  blob, off, &accepted);
     free(blob);
-    if (s != SGX_SUCCESS || rc != 0) {
-        fprintf(stderr, "parties: ecall_parties_add_researcher('%s') "
-                        "failed (s=0x%x rc=%d)\n", id, s, rc);
+    if (rc != 0) {
+        fprintf(stderr, "parties: add_researcher('%s') sink rc=%d\n", id, rc);
         return -1;
     }
     if (!accepted) {
@@ -158,11 +146,11 @@ static int add_researcher(sgx_enclave_id_t eid, cJSON* r)
     return 0;
 }
 
-int parties_load_into_enclave(sgx_enclave_id_t eid,
-                              const char* json_path,
-                              uint32_t* out_hospitals,
-                              uint32_t* out_researchers,
-                              uint32_t* out_rejected)
+extern "C" int parties_load_json(const char* json_path,
+                                 PartiesSink* sink,
+                                 uint32_t* out_hospitals,
+                                 uint32_t* out_researchers,
+                                 uint32_t* out_rejected)
 {
     *out_hospitals = *out_researchers = *out_rejected = 0;
 
@@ -192,31 +180,27 @@ int parties_load_into_enclave(sgx_enclave_id_t eid,
     }
     uint32_t quorum_m = (uint32_t)jquorum->valuedouble;
 
-    int rc = 0;
-    sgx_status_t s = ecall_parties_begin(eid, &rc, quorum_m);
-    if (s != SGX_SUCCESS || rc != 0) {
-        fprintf(stderr, "parties: ecall_parties_begin failed (s=0x%x rc=%d)\n", s, rc);
+    if (sink->begin(sink->ctx, quorum_m) != 0) {
+        fprintf(stderr, "parties: sink->begin failed\n");
         cJSON_Delete(root);
         return -3;
     }
 
     cJSON* h;
     cJSON_ArrayForEach(h, jhosp) {
-        if (add_hospital(eid, h) != 0) { cJSON_Delete(root); return -2; }
+        if (add_hospital(sink, h) != 0) { cJSON_Delete(root); return -2; }
     }
 
     cJSON* r;
     cJSON_ArrayForEach(r, jres) {
-        if (add_researcher(eid, r) != 0) {
-            cJSON_Delete(root); return -2;
-        }
+        if (add_researcher(sink, r) != 0) { cJSON_Delete(root); return -2; }
     }
 
     uint32_t h_count = 0, r_count = 0, rej_count = 0;
-    s = ecall_parties_end(eid, &rc, &h_count, &r_count, &rej_count);
+    int rc = sink->end(sink->ctx, &h_count, &r_count, &rej_count);
     cJSON_Delete(root);
-    if (s != SGX_SUCCESS || rc != 0) {
-        fprintf(stderr, "parties: ecall_parties_end failed (s=0x%x rc=%d)\n", s, rc);
+    if (rc != 0) {
+        fprintf(stderr, "parties: sink->end failed (rc=%d)\n", rc);
         return -3;
     }
     *out_hospitals   = h_count;
