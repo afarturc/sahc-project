@@ -1,13 +1,11 @@
 # Correr e validar em hardware Intel SGX
 
-Documento único para o colega que vai correr o protótipo numa máquina
-Intel real. Setup → build → testes esperados → bench → troubleshooting.
-
-> **Aviso honesto.** O autor não tem acesso a hardware Intel SGX, por
-> isso o caminho DCAP nunca correu fim-a-fim contra um quoting enclave
-> real. Este documento é tornado tão determinístico quanto possível
-> para que, se algo falhar, seja fácil isolar bug nosso vs problema
-> de setup.
+Setup, build, testes esperados, bench e troubleshooting para correr o
+protótipo numa máquina com Intel SGX habilitado. O caminho DCAP nunca
+correu fim-a-fim contra um quoting enclave real durante o
+desenvolvimento — este guia é deliberadamente determinístico para que
+qualquer falha seja fácil de isolar entre bug de código e problema de
+setup.
 
 ---
 
@@ -33,8 +31,8 @@ cat /etc/sgx_default_qcnl.conf | head -5    # PCCS endpoint
 gramine-sgx --version                       # 1.9.x
 ```
 
-Se algum destes falhar, **parar e reportar** — não vale a pena tentar
-correr os testes; os erros que vão surgir vão ser ruído.
+Se algum destes falhar, parar aqui — os testes seguintes vão produzir
+erros derivados e dificultar o diagnóstico.
 
 ## 2. Build
 
@@ -159,8 +157,9 @@ SAHC_REQUIRE_DCAP=1 ./sgx_client 127.0.0.1 7878 fcup-research - age avg any
 ```
 **Esperado:** servidor imprime `Server: state loaded from sealed blob`;
 query devolve o mesmo `49.143` sem precisar de re-upload. Se o blob
-não desselar, **reportar** — a sealing key derivada de
-`/dev/attestation/keys/_sgx_mrenclave` é o ponto crítico.
+não desselar é regressão — a sealing key derivada de
+`/dev/attestation/keys/_sgx_mrenclave` é o ponto crítico para
+sobreviver a restart.
 
 ## 5. Diferenças efectivas direct → sgx
 
@@ -184,16 +183,14 @@ Output: handshake p50/p95/p99, upload throughput por batch, query
 latency. Comparar com `bench-sim.md` para quantificar overhead
 DCAP + EPC.
 
-## 7. Como reportar
+## 7. Diagnóstico de falhas
 
-Para cada teste que **falhar**, anexar:
-1. O comando exacto que correu.
-2. Output completo do **cliente E servidor** (stdout + stderr).
+Quando um teste falha, recolher:
+1. Comando exacto.
+2. Output completo do cliente e do servidor (stdout + stderr).
 3. `dmesg | tail -50` se houver suspeita de driver SGX.
 4. `cat /etc/sgx_default_qcnl.conf` (sem secrets).
-5. Versão: `gramine-sgx --version`, `dpkg -l | grep sgx`.
-
-Para testes que passarem, basta marcar OK na lista (B.1 → B.5).
+5. Versões: `gramine-sgx --version`, `dpkg -l | grep sgx`.
 
 ## 8. Tolerância a falhas
 
@@ -212,5 +209,5 @@ comportamento sob TCP timeout, decrypt failure, k-anon insuficiente.
 | `sgx_qv_verify_quote 0x...A001` (NO_QPL)               | falta `libsgx-dcap-default-qpl`                              |
 | `sgx_qv_verify_quote 0x...A002` (CRL_UNAVAILABLE)      | PCCS unreachable / `qcnl.conf` errado                        |
 | `qv_result rejected 0xA006` (OUT_OF_DATE)              | TCB do CPU desactualizado — fazer microcode update           |
-| `qv_result rejected 0xA00C` (REVOKED)                  | PCK revogada — máquina banida do TCB; reportar               |
-| `DCAP report_data binding mismatch`                    | bug nosso — reportar com hexdump do quote                    |
+| `qv_result rejected 0xA00C` (REVOKED)                  | PCK revogada — máquina banida do TCB                         |
+| `DCAP report_data binding mismatch`                    | bug de código — capturar hexdump do quote para diagnóstico   |

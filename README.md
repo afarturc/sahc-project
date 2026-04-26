@@ -8,7 +8,7 @@ Desenvolvido no âmbito da disciplina **Segurança e Aplicações de Hardware Co
 
 - **Milestone 1 (Fase 1)** — protótipo single-process entregue. Tag `v1.0-milestone1` preserva esse estado.
 - **Milestone 2 (Fases 2–4)** — fechado em SIM. Implementado: cliente/servidor TCP concorrente (pthread por conexão, `MAX_SESSIONS=8`), identidades ECDSA P-256 com admissão por quórum, handshake atestação + ECDH P-256 + HKDF-SHA256, canal AEAD AES-128-GCM com sequence numbers, enforcement de roles (HOSPITAL/RESEARCHER), k-anonymity (k=5), sealing MRENCLAVE-bound, REPL, MRENCLAVE pinning auto-gerado de `sgx_sign dump`, **migração para Gramine 1.9 + DuckDB v1.1.3** (variante `gramine_server`), **atestação DCAP real** (`SAHC_HW=1`: servidor lê `/dev/attestation/quote`, cliente chama `sgx_qv_verify_quote()`).
-- **Validação em hardware Intel**: pendente, ver [`docs/HW.md`](docs/HW.md). Quota Azure DCsv* recusada na subscrição Students; o trabalho HW corre em máquina externa de um colaborador.
+- **Validação em hardware Intel**: pendente, ver [`docs/HW.md`](docs/HW.md). Quota Azure DCsv* recusada na subscrição Students; a validação HW é feita externamente.
 
 Os artefactos da Milestone 1 (relatório, slides, guião, diagramas drawio) estão em [`docs/milestone1/`](docs/milestone1/).
 
