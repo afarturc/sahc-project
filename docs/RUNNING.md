@@ -3,8 +3,7 @@
 Guia único para pôr o protótipo a funcionar. Linear, copy-paste.
 
 - Para correr **localmente sem hardware SGX** → segue da §1 à §5.
-- Para correr em **Intel HW real** → §1, §2, depois salta para
-  [`SIM_TO_HW.md`](SIM_TO_HW.md) e [`HW_VALIDATION.md`](HW_VALIDATION.md).
+- Para correr em **Intel HW real** → vai directo a [`HW.md`](HW.md).
 
 ---
 
@@ -143,12 +142,9 @@ mesmos números sem re-upload.
 ## 6. Hardware Intel real
 
 Se tens uma máquina com SGX habilitado e queres correr DCAP a sério
-(não simulado), **não** sigas as secções 3-5 acima. Vai directo a:
-
-1. [`docs/SIM_TO_HW.md`](SIM_TO_HW.md) — pré-requisitos HW (drivers,
-   PCCS, DCAP libs), build com `SAHC_HW=1`, manifest HW.
-2. [`docs/HW_VALIDATION.md`](HW_VALIDATION.md) — runbook de testes
-   com expected outputs e mapa de erros.
+(não simulado), **não** sigas as secções 3-5 acima. Vai directo a
+[`HW.md`](HW.md) — cobre setup, build, testes esperados, bench e
+troubleshooting num único documento.
 
 ## 7. Troubleshooting rápido
 

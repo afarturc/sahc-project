@@ -8,7 +8,7 @@ Desenvolvido no âmbito da disciplina **Segurança e Aplicações de Hardware Co
 
 - **Milestone 1 (Fase 1)** — protótipo single-process entregue. Tag `v1.0-milestone1` preserva esse estado.
 - **Milestone 2 (Fases 2–4)** — fechado em SIM. Implementado: cliente/servidor TCP concorrente (pthread por conexão, `MAX_SESSIONS=8`), identidades ECDSA P-256 com admissão por quórum, handshake atestação + ECDH P-256 + HKDF-SHA256, canal AEAD AES-128-GCM com sequence numbers, enforcement de roles (HOSPITAL/RESEARCHER), k-anonymity (k=5), sealing MRENCLAVE-bound, REPL, MRENCLAVE pinning auto-gerado de `sgx_sign dump`, **migração para Gramine 1.9 + DuckDB v1.1.3** (variante `gramine_server`), **atestação DCAP real** (`SAHC_HW=1`: servidor lê `/dev/attestation/quote`, cliente chama `sgx_qv_verify_quote()`).
-- **Validação em hardware Intel**: pendente, ver [`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md). Quota Azure DCsv* recusada na subscrição Students; o trabalho HW corre em máquina externa de um colaborador.
+- **Validação em hardware Intel**: pendente, ver [`docs/HW.md`](docs/HW.md). Quota Azure DCsv* recusada na subscrição Students; o trabalho HW corre em máquina externa de um colaborador.
 
 Os artefactos da Milestone 1 (relatório, slides, guião, diagramas drawio) estão em [`docs/milestone1/`](docs/milestone1/).
 
@@ -104,7 +104,7 @@ scripts/                # gen_identity.py, build_authorized_parties.py,
 data/                   # CSVs por hospital + sealed/state.bin (gitignored)
 parties/                # chaves long-term .key/.pub (gitignored)
 authorized_parties.json # registo público de identidades autorizadas
-docs/                   # RUNNING.md, SIM_TO_HW.md, HW_VALIDATION.md,
+docs/                   # RUNNING.md, HW.md,
                         # milestone1/, refs/
 PLANO_FINAL.md          # plano de Milestone 2 (Fases 2-4 fechadas)
 ```
@@ -114,14 +114,12 @@ PLANO_FINAL.md          # plano de Milestone 2 (Fases 2-4 fechadas)
 Guia operacional completo (pré-requisitos, build, run, troubleshooting)
 em **[`docs/RUNNING.md`](docs/RUNNING.md)** — ponto único de entrada.
 
-Para validação em hardware Intel real:
-[`docs/SIM_TO_HW.md`](docs/SIM_TO_HW.md) +
-[`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md).
+Para correr em hardware Intel real: [`docs/HW.md`](docs/HW.md).
 
 ## Limitações Conhecidas
 
 - **DCAP real só no caminho Gramine**. O `sgx_server` (SGX-SDK) emite o quote artesanal SAHC mesmo em build HW; passar a DCAP real exigiria `sgx_qe_get_quote()` dentro do enclave — fora do escopo. O caminho de produção é o `gramine_server` com `SAHC_HW=1`.
-- **HW não validado por nós**. O código DCAP foi escrito sem acesso a hardware Intel; a validação está delegada (ver [`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md)).
+- **HW não validado por nós**. O código DCAP foi escrito sem acesso a hardware Intel; a validação está delegada (ver [`docs/HW.md`](docs/HW.md)).
 - **Sem cap de conexões simultâneas no servidor**: a 9ª sessão concorrente apanha `E_INTERNAL` (slot exhaustion) — comportamento correcto mas não elegante.
 - **Sem revogação dinâmica**: para remover uma party é preciso editar o JSON e remover `data/sealed/state.bin` para forçar reload.
 - **Sealed blob não migra entre backends**. Trocar SGX-SDK ↔ Gramine ou SIM ↔ HW invalida `data/sealed/state.bin` (sealing keys diferentes).
