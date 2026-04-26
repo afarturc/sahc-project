@@ -43,9 +43,6 @@ Thumbs.db
 gramine_server.manifest
 gramine_server.manifest.sgx
 gramine_server.sig
-Gramine/hello.manifest
-Gramine/hello.manifest.sgx
-Gramine/hello.sig
 EnclaveLogic/*.o
 sahc_smoke
 gramine_server

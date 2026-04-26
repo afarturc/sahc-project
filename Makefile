@@ -80,7 +80,7 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs \
     -Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
     -Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
-.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave gramine_server gramine_manifest gramine_manifest_hw
+.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave gramine_server gramine_manifest gramine_manifest_hw sahc_smoke
 
 all: sgx_server sgx_client enclave Include/expected_mrenclave.h
 
@@ -261,12 +261,22 @@ gramine_manifest_hw: gramine_server Gramine/server.manifest.template
 		--manifest gramine_server.manifest \
 		--output   gramine_server.manifest.sgx
 
+# Standalone unit smoke for the OpenSSL crypto backend (random, ECDH,
+# ECDSA, SHA-256, HMAC, AES-GCM round-trips against RFC vectors).
+# Builds without the SGX SDK — useful as a regression after touching
+# EnclaveLogic/crypto_backend_openssl.cpp.
+sahc_smoke: EnclaveLogic/smoke.cpp EnclaveLogic/crypto_backend_openssl.cpp \
+            EnclaveLogic/crypto_backend.h
+	g++ -std=c++17 -Wall -O2 -IEnclaveLogic \
+	    EnclaveLogic/smoke.cpp EnclaveLogic/crypto_backend_openssl.cpp \
+	    -lcrypto -o sahc_smoke
+
 clean:
 	rm -f Server/*.o Client/*.o Bench/*.o Common/*.o Common/third_party/*.o \
 		Enclave/*.o EnclaveLogic/*.o Gramine/*.o *.o *.so \
 		Server/*.gramine.o EnclaveLogic/*.gramine.o Gramine/*.gramine.o \
 		Common/*.gramine.o Common/third_party/*.gramine.o \
-		sgx_server sgx_client sgx_bench gramine_server \
+		sgx_server sgx_client sgx_bench gramine_server sahc_smoke \
 		gramine_server.manifest gramine_server.manifest.sgx \
 		gramine_server.sig \
 		Enclave/Enclave_t.* Enclave_u.* \
