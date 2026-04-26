@@ -14,17 +14,31 @@ Os artefactos da Milestone 1 (relatório, slides, guião, diagramas drawio) est�
 
 ## Arquitetura
 
-Modelo split-trust com três processos: o cliente (`sgx_client`), o servidor untrusted (`sgx_server`) e o enclave (`enclave.signed.so`) que o servidor carrega. O canal cliente↔enclave passa fisicamente pelo servidor mas é cifrado fim-a-fim com a chave de sessão derivada por ECDH.
+Modelo split-trust com dois caminhos de servidor que partilham o
+cliente e o protocolo. O trusted core (`EnclaveLogic/`) é neutro de
+backend e compila para os dois lados:
+
+- **`sgx_server`** — caminho SGX-SDK clássico, com enclave
+  `enclave.signed.so` carregado via ECALLs. Motor de query artesanal.
+- **`gramine_server`** — caminho Gramine LibOS, mesma `EnclaveLogic`
+  linkada com OpenSSL + Gramine pseudofiles. Motor de query DuckDB
+  (SQL real). Atestação DCAP real quando construído com `SAHC_HW=1`.
+
+O canal cliente↔trusted-core passa fisicamente pelo servidor mas é
+cifrado fim-a-fim com a chave de sessão derivada por ECDH.
 
 ```
-┌──────────────────┐                  ┌───────────────────────────────┐
-│  sgx_client      │   TCP frames     │  sgx_server (untrusted)       │
-│                  │ ←──────────────→ │  ┌──────────────────────────┐ │
-│  ECDSA identity  │   AES-128-GCM    │  │  enclave.signed.so       │ │
-│  ECDH ephemeral  │   (after KEX)    │  │  • parties + records     │ │
-│  CSV loader      │                  │  │  • session keys          │ │
-│  Query REPL      │                  │  │  • AEAD decrypt + agg.   │ │
-└──────────────────┘                  │  │  • seal/unseal           │ │
+┌──────────────────┐    TCP frames    ┌───────────────────────────────┐
+│  sgx_client      │ ←──────────────→ │  Server (untrusted host)      │
+│  ECDSA identity  │   AES-128-GCM    │  ┌──────────────────────────┐ │
+│  ECDH ephemeral  │   (after KEX)    │  │  Trusted core            │ │
+│  Quote verifier  │                  │  │  ─ SDK enclave (sgx_*)   │ │
+│  CSV loader      │                  │  │  ─ ou Gramine LibOS      │ │
+│  Query REPL      │                  │  │    + DuckDB              │ │
+└──────────────────┘                  │  │  • parties + records     │ │
+                                      │  │  • session keys          │ │
+                                      │  │  • AEAD decrypt + agg.   │ │
+                                      │  │  • seal/unseal           │ │
                                       │  └──────────────────────────┘ │
                                       │  data/sealed/state.bin ←──┘  │
                                       └───────────────────────────────┘
@@ -35,7 +49,7 @@ Modelo split-trust com três processos: o cliente (`sgx_client`), o servidor unt
 1. **Bootstrap (servidor)**: carrega `enclave.signed.so`; tenta `unseal` de `data/sealed/state.bin`; se não existir, lê `authorized_parties.json`, valida o quórum dos investigadores e faz `seal` inicial.
 2. **Conexão TCP** do cliente para `127.0.0.1:7878`.
 3. **`ATTEST_REQ`** (C→S): `party_id || nonce(16) || client_ecdh_pub(64) || ECDSA_sig(64)`. A assinatura cobre `"SAHC-attest-v1" || nonce || client_ecdh_pub` com a chave long-term do cliente.
-4. **`ATTEST_RESP`** (S→C): quote serializado (MRENCLAVE, MRSIGNER, ISV ids, `user_data = SHA256(nonce || enclave_ecdh_pub)`, ECDSA do quote, QE identity) seguido de `enclave_ecdh_pub(64)`. O cliente verifica MRENCLAVE pinned e o binding `user_data`.
+4. **`ATTEST_RESP`** (S→C): `quote_format(1) || body`. Em SIM o body é o quote artesanal (MRENCLAVE, MRSIGNER, ISV ids, `user_data = SHA256(nonce || enclave_ecdh_pub)`, ECDSA do quote, QE identity, `enclave_ecdh_pub`); em build HW (`SAHC_HW=1`) o body é `enclave_ecdh_pub || quote_len || sgx_quote3_t` real lido de `/dev/attestation/quote`. Cliente despacha por format byte: SIM valida binding + MRENCLAVE pin; HW chama `sgx_qv_verify_quote()` antes do mesmo binding + pin.
 5. **HKDF**: `PRK = HMAC-SHA256("SAHC-v1", ECDH_shared)`; expande para `session_key (16 B AES-128)` e `iv_prefix (4 B)`.
 6. **`KEY_CONFIRM`** (C→S): `HMAC-SHA256(session_key, "confirm")`. O enclave valida, atribui o role do `party_id` e responde **`KEY_ACK`** com `status || role`.
 7. **Frames AEAD** a partir daqui: `[type | len | seq(8) | iv(12) | ciphertext | tag(16)]`, `iv = iv_prefix || seq`. AAD = cabeçalho. `seq` separado por sentido, monotónico.
@@ -62,142 +76,47 @@ Identidades vivem em `parties/<id>.{key,pub}` (PEM), gerados por `scripts/gen_id
 ## Estrutura do Repositório
 
 ```
-Server/                 # processo untrusted (TCP + dispatcher + enclave host)
+Server/                 # caminho SGX-SDK: TCP + dispatcher + enclave host
   server_main.cpp       # accept loop, sealing I/O, handlers por message type
-  parties_loader.cpp/h  # parsing JSON, validação de quórum, push para enclave
-Client/                 # processo cliente (TCP + handshake + REPL)
+  parties_loader.cpp/h  # parsing JSON, validação de quórum
+Gramine/                # caminho Gramine LibOS
+  server_main.cpp       # mesmo dispatcher, sem ECALL boundary
+  server.manifest.template  # Jinja: dev (gramine-direct) e HW (gramine-sgx)
+EnclaveLogic/           # trusted core neutro de backend (SDK ou Gramine)
+  enclave_logic.cpp     # attest_begin, key_confirm, upload, query, seal
+  crypto_backend_*.cpp  # sgx_tcrypto (SDK) ou OpenSSL (Gramine)
+  identity_backend_*.cpp# sgx self-report ou /dev/attestation pseudofiles
+  seal_backend_*.cpp    # sgx_seal_data_ex ou Gramine MRENCLAVE-bound key
+  query_engine_*.cpp    # artesanal (SDK) ou DuckDB (Gramine)
+Client/                 # cliente partilhado pelos dois caminhos
   client_main.cpp       # ATTEST_REQ → KEY_CONFIRM → REPL/single-shot
-  identity.cpp/h        # ECDSA P-256 (load PEM, sign, verify)
-  secure_frame.cpp/h    # AES-128-GCM AEAD, sequence numbers
-  csv_loader.cpp/h      # parsing dos CSVs por hospital
-Common/                 # partilhado entre Server e Client (host-side)
-  framing.cpp/h         # frame header, send/recv robustos
-  tcp_util.cpp/h        # connect / listen / accept / timeouts
-  third_party/cJSON.*   # parser JSON
-Enclave/                # código trusted (compila com sgx_tcrypto)
-  Enclave.cpp           # attest_begin, key_confirm, upload, query, seal
-  Enclave.edl           # interface ECALL/OCALL
-  Enclave.config.xml    # heap/stack/threads
-Include/
-  patient.h             # PatientRecord, diagnosis/field/op constants
-  protocol.h            # message types, sizes, error codes, k-anon threshold
-  party.h               # PartyRole, PartyEntry (passados ao enclave)
-scripts/
-  gen_identity.py             # gera <id>.{key,pub} P-256 PEM
-  build_authorized_parties.py # monta authorized_parties.json + assinaturas
+  session.cpp           # ClientSession API (reutilizada pelo bench)
+  quote_verify.cpp      # dispatcher SAHC vs DCAP (sgx_qv_verify_quote em HW)
+  identity.cpp          # ECDSA P-256 (load PEM, sign, verify)
+  secure_frame.cpp      # AES-128-GCM AEAD, sequence numbers
+  csv_loader.cpp        # parsing dos CSVs por hospital
+Bench/                  # bench.cpp — handshake, upload throughput, query lat.
+Common/                 # framing, tcp_util, cJSON (host-side, partilhado)
+Enclave/                # SDK enclave (Enclave.{cpp,edl,config.xml})
+Include/                # patient.h, protocol.h, party.h
+scripts/                # gen_identity.py, build_authorized_parties.py,
+                        # extract_mrenclave.sh, fetch_duckdb.sh
 data/                   # CSVs por hospital + sealed/state.bin (gitignored)
 parties/                # chaves long-term .key/.pub (gitignored)
 authorized_parties.json # registo público de identidades autorizadas
-PLANO_FINAL.md          # plano da Milestone 2 (fonte de verdade)
-docs/milestone1/        # entregáveis da Fase 1
+docs/                   # RUNNING.md, SIM_TO_HW.md, HW_VALIDATION.md,
+                        # milestone1/, refs/
+PLANO_FINAL.md          # plano de Milestone 2 (Fases 2-4 fechadas)
 ```
 
-## Pré-requisitos
+## Como correr
 
-- Linux (testado em Debian)
-- [Intel SGX SDK for Linux](https://github.com/intel/linux-sgx) em `/opt/intel/sgxsdk`
-- OpenSSL ≥ 1.1 (`libssl-dev`) — usado no cliente para ECDSA, ECDH, HKDF, AEAD
-- Python 3 — para `scripts/gen_identity.py` e `scripts/build_authorized_parties.py`
-- GNU Make, `g++`
+Guia operacional completo (pré-requisitos, build, run, troubleshooting)
+em **[`docs/RUNNING.md`](docs/RUNNING.md)** — ponto único de entrada.
 
-## Build
-
-Há **dois caminhos de servidor** que partilham o cliente, o protocolo e
-a EnclaveLogic; a diferença é só onde corre o trusted core.
-
-```bash
-source /opt/intel/sgxsdk/environment
-./scripts/fetch_duckdb.sh     # libduckdb.so para o caminho Gramine
-make                          # SGX-SDK path: sgx_server + sgx_client + enclave.signed.so
-make gramine_server           # Gramine path: enclave-logic + DuckDB sob LibOS
-make gramine_manifest         # manifest dev (gramine-direct)
-make clean
-```
-
-Switches relevantes:
-
-- `SGX_MODE=SIM` (default) / `SGX_MODE=HW` — bibliotecas `*_sim` vs reais.
-- `SAHC_HW=1` — activa a atestação DCAP real (servidor Gramine emite
-  `sgx_quote3_t` via `/dev/attestation/quote`; cliente parseia e chama
-  `sgx_qv_verify_quote()` da QvL). Implica `-lsgx_dcap_quoteverify` no
-  cliente. Para HW de produção: `make SAHC_HW=1 gramine_server &&
-  make gramine_manifest_hw`.
-
-Para correr em hardware Intel real seguir [`docs/SIM_TO_HW.md`](docs/SIM_TO_HW.md)
-e validar com [`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md).
-
-## Setup inicial (uma vez)
-
-Gerar identidades e o `authorized_parties.json`:
-
-```bash
-python3 scripts/gen_identity.py hosp-santa-maria
-python3 scripts/gen_identity.py hosp-sao-joao
-python3 scripts/gen_identity.py hosp-santo-antonio
-python3 scripts/gen_identity.py fcup-research
-python3 scripts/build_authorized_parties.py        # monta JSON + assinaturas de quórum
-```
-
-Os artefactos das chaves vão para `parties/`; o JSON resultante para a raiz do repo.
-
-## Correr
-
-Num terminal:
-
-```bash
-./sgx_server                       # 127.0.0.1:7878 por defeito
-./sgx_server 0.0.0.0 9000          # host/porta custom
-```
-
-No primeiro arranque o servidor lê `authorized_parties.json` e cria `data/sealed/state.bin`. Em arranques seguintes faz unseal direto desse blob (parties + registos sobrevivem).
-
-O servidor é concorrente: cada conexão é servida por uma thread dedicada (`pthread`) e o enclave aceita até `MAX_SESSIONS=8` sessões simultâneas (`TCSNum=8`). Múltiplos clientes podem estar em REPL ao mesmo tempo; UPLOADs concorrentes serializam apenas no `seal+write` para preservar a ordem do blob em disco.
-
-Noutro terminal — modo REPL (recomendado):
-
-```bash
-./sgx_client 127.0.0.1 7878 hosp-santa-maria
-sahc> upload data/hospital_0.csv
-sahc> query age avg diabetes
-sahc> query temperature max any
-sahc> quit
-```
-
-Modo single-shot (útil para scripting):
-
-```bash
-# upload
-./sgx_client 127.0.0.1 7878 hosp-santa-maria data/hospital_0.csv
-
-# query (csv_path = "-" salta o upload)
-./sgx_client 127.0.0.1 7878 fcup-research - blood_sugar avg diabetes
-```
-
-Demo de duas sessões em simultâneo (com o servidor a correr noutro terminal):
-
-```bash
-./sgx_client 127.0.0.1 7878 hosp-santa-maria &      # REPL hospital
-./sgx_client 127.0.0.1 7878 fcup-research          # REPL investigador
-# no log do servidor aparecem handles 1 e 2 atribuídos em paralelo
-```
-
-Argumentos do REPL:
-
-- `upload <csv_path>` — apenas roles `HOSPITAL`.
-- `query <field> <op> [diag]`
-  - `field`: `age` | `temperature` | `blood_sugar`
-  - `op`: `avg` | `min` | `max` | `count`
-  - `diag`: `any` | `healthy` | `diabetes` | `hypertension` | `infection`
-- `help`, `quit`.
-
-## Formato dos Dados
-
-```csv
-patient_id,age,temperature,blood_sugar,diagnosis
-1001,45,36.5,95.0,1
-```
-
-Códigos: `0` healthy, `1` diabetes, `2` hypertension, `3` infection.
+Para validação em hardware Intel real:
+[`docs/SIM_TO_HW.md`](docs/SIM_TO_HW.md) +
+[`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md).
 
 ## Limitações Conhecidas
 
@@ -212,7 +131,9 @@ Códigos: `0` healthy, `1` diabetes, `2` hypertension, `3` infection.
 | Componente | Tecnologia |
 |---|---|
 | Linguagem | C/C++ |
-| Crypto trusted | `sgx_tcrypto` (rijndael128GCM, ECDSA, ECDH, HMAC-SHA256, sealing) |
+| Crypto trusted | `sgx_tcrypto` (caminho SDK) ou OpenSSL (caminho Gramine) — AES-128-GCM, ECDSA P-256, ECDH, HMAC-SHA256, sealing |
+| Query engine | Artesanal (SDK) ou DuckDB v1.1.3 com SQL allowlist (Gramine) |
+| LibOS | Gramine 1.9 (caminho `gramine_server`) |
 | Crypto untrusted (cliente) | OpenSSL 1.1+ (EC, EVP, AES-128-GCM, HMAC) |
 | Atestação | Intel DCAP (real no caminho Gramine sob `SAHC_HW=1`; SAHC artesanal em SIM e no caminho SDK) |
 | Transporte | TCP cru + framing próprio (header 5 B, AEAD pós-KEX) |
