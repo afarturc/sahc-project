@@ -7,8 +7,8 @@ Desenvolvido no âmbito da disciplina **Segurança e Aplicações de Hardware Co
 ## Estado Atual
 
 - **Milestone 1 (Fase 1)** — protótipo single-process entregue. Tag `v1.0-milestone1` preserva esse estado.
-- **Milestone 2 (Fase 2)** — em curso. Já implementado: separação cliente/servidor TCP, identidades ECDSA P-256 com admissão por quórum, handshake atestação + ECDH P-256 + HKDF-SHA256, canal AEAD AES-128-GCM com sequence numbers, enforcement de roles (HOSPITAL/RESEARCHER), k-anonymity (k=5), sealing do estado (parties + registos) entre reinícios, REPL interativo. Falta: multi-sessão concorrente, MRENCLAVE pinning a partir do binário assinado.
-- **Fases 3–4** — planeadas. Ver [`PLANO_FINAL.md`](PLANO_FINAL.md).
+- **Milestone 2 (Fases 2–4)** — fechado em SIM. Implementado: cliente/servidor TCP concorrente (pthread por conexão, `MAX_SESSIONS=8`), identidades ECDSA P-256 com admissão por quórum, handshake atestação + ECDH P-256 + HKDF-SHA256, canal AEAD AES-128-GCM com sequence numbers, enforcement de roles (HOSPITAL/RESEARCHER), k-anonymity (k=5), sealing MRENCLAVE-bound, REPL, MRENCLAVE pinning auto-gerado de `sgx_sign dump`, **migração para Gramine 1.9 + DuckDB v1.1.3** (variante `gramine_server`), **atestação DCAP real** (`SAHC_HW=1`: servidor lê `/dev/attestation/quote`, cliente chama `sgx_qv_verify_quote()`).
+- **Validação em hardware Intel**: pendente, ver [`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md). Quota Azure DCsv* recusada na subscrição Students; o trabalho HW corre em máquina externa de um colaborador.
 
 Os artefactos da Milestone 1 (relatório, slides, guião, diagramas drawio) estão em [`docs/milestone1/`](docs/milestone1/).
 
@@ -102,16 +102,29 @@ docs/milestone1/        # entregáveis da Fase 1
 
 ## Build
 
+Há **dois caminhos de servidor** que partilham o cliente, o protocolo e
+a EnclaveLogic; a diferença é só onde corre o trusted core.
+
 ```bash
 source /opt/intel/sgxsdk/environment
-make                # gera sgx_server, sgx_client, enclave.signed.so
-make sgx_server     # apenas o servidor
-make sgx_client     # apenas o cliente
-make enclave        # apenas o .signed.so
+./scripts/fetch_duckdb.sh     # libduckdb.so para o caminho Gramine
+make                          # SGX-SDK path: sgx_server + sgx_client + enclave.signed.so
+make gramine_server           # Gramine path: enclave-logic + DuckDB sob LibOS
+make gramine_manifest         # manifest dev (gramine-direct)
 make clean
 ```
 
-Build em modo simulação (`SGX_MODE=SIM`) — não requer hardware SGX.
+Switches relevantes:
+
+- `SGX_MODE=SIM` (default) / `SGX_MODE=HW` — bibliotecas `*_sim` vs reais.
+- `SAHC_HW=1` — activa a atestação DCAP real (servidor Gramine emite
+  `sgx_quote3_t` via `/dev/attestation/quote`; cliente parseia e chama
+  `sgx_qv_verify_quote()` da QvL). Implica `-lsgx_dcap_quoteverify` no
+  cliente. Para HW de produção: `make SAHC_HW=1 gramine_server &&
+  make gramine_manifest_hw`.
+
+Para correr em hardware Intel real seguir [`docs/SIM_TO_HW.md`](docs/SIM_TO_HW.md)
+e validar com [`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md).
 
 ## Setup inicial (uma vez)
 
@@ -188,10 +201,11 @@ Códigos: `0` healthy, `1` diabetes, `2` hypertension, `3` infection.
 
 ## Limitações Conhecidas
 
-- **MRENCLAVE pinned hardcoded** no cliente (`EXPECTED_MRENCLAVE` em `Client/client_main.cpp`). Em produção é lido do `.signed.so`.
-- **Quote DCAP simulado**: a assinatura QE não é validada contra a raiz Intel. A Fase 4 do plano endereça isto (em hardware real Azure DCsv3 — bloqueado por quota na nossa subscrição Students; ver `PLANO_FINAL.md`).
+- **DCAP real só no caminho Gramine**. O `sgx_server` (SGX-SDK) emite o quote artesanal SAHC mesmo em build HW; passar a DCAP real exigiria `sgx_qe_get_quote()` dentro do enclave — fora do escopo. O caminho de produção é o `gramine_server` com `SAHC_HW=1`.
+- **HW não validado por nós**. O código DCAP foi escrito sem acesso a hardware Intel; a validação está delegada (ver [`docs/HW_VALIDATION.md`](docs/HW_VALIDATION.md)).
 - **Sem cap de conexões simultâneas no servidor**: a 9ª sessão concorrente apanha `E_INTERNAL` (slot exhaustion) — comportamento correcto mas não elegante.
 - **Sem revogação dinâmica**: para remover uma party é preciso editar o JSON e remover `data/sealed/state.bin` para forçar reload.
+- **Sealed blob não migra entre backends**. Trocar SGX-SDK ↔ Gramine ou SIM ↔ HW invalida `data/sealed/state.bin` (sealing keys diferentes).
 
 ## Stack
 
@@ -200,6 +214,6 @@ Códigos: `0` healthy, `1` diabetes, `2` hypertension, `3` infection.
 | Linguagem | C/C++ |
 | Crypto trusted | `sgx_tcrypto` (rijndael128GCM, ECDSA, ECDH, HMAC-SHA256, sealing) |
 | Crypto untrusted (cliente) | OpenSSL 1.1+ (EC, EVP, AES-128-GCM, HMAC) |
-| Atestação | Intel DCAP (simulada — Fases 2–3) |
+| Atestação | Intel DCAP (real no caminho Gramine sob `SAHC_HW=1`; SAHC artesanal em SIM e no caminho SDK) |
 | Transporte | TCP cru + framing próprio (header 5 B, AEAD pós-KEX) |
 | Build | GNU Make, `sgx_edger8r`, `sgx_sign` |
