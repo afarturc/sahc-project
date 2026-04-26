@@ -68,7 +68,7 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs \
     -Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
     -Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
-.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave gramine_server gramine_manifest
+.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave gramine_server gramine_manifest gramine_manifest_hw
 
 all: sgx_server sgx_client enclave Include/expected_mrenclave.h
 
@@ -218,16 +218,36 @@ gramine_server: $(Gramine_Cpp_Objects) $(Gramine_C_Objects) \
 # work too (gramine-direct only needs the unsigned .manifest). Run from
 # the project root so file:foo URIs resolve against the actual binary
 # and json paths.
+#
+# Two flavours:
+#   gramine_manifest    — dev profile (debug=true, host env passthrough,
+#                         verbose log); used by gramine-direct smoke.
+#   gramine_manifest_hw — HW production profile (debug=false, no host
+#                         env wildcard, log_level=error); for gramine-sgx.
 gramine_manifest: gramine_server Gramine/server.manifest.template
 	gramine-manifest \
 		-Dlog_level=error \
 		-Darch_libdir=/lib/x86_64-linux-gnu \
 		-Dproject_root=$(CURDIR) \
+		-Ddebug=true \
+		-Dhost_env_mode=passthrough \
 		Gramine/server.manifest.template gramine_server.manifest
 	gramine-sgx-sign \
 		--manifest gramine_server.manifest \
 		--output   gramine_server.manifest.sgx \
 		|| echo "(gramine-sgx-sign skipped — fine if no signing key)"
+
+gramine_manifest_hw: gramine_server Gramine/server.manifest.template
+	gramine-manifest \
+		-Dlog_level=error \
+		-Darch_libdir=/lib/x86_64-linux-gnu \
+		-Dproject_root=$(CURDIR) \
+		-Ddebug=false \
+		-Dhost_env_mode=explicit \
+		Gramine/server.manifest.template gramine_server.manifest
+	gramine-sgx-sign \
+		--manifest gramine_server.manifest \
+		--output   gramine_server.manifest.sgx
 
 clean:
 	rm -f Server/*.o Client/*.o Bench/*.o Common/*.o Common/third_party/*.o \

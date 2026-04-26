@@ -4,7 +4,16 @@ loader.log_level = "{{ log_level }}"
 
 loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
 loader.insecure__use_cmdline_argv = true
+
+# host_env_mode is "passthrough" for dev (gramine-direct smoke needs
+# arbitrary env so SAHC_* knobs work without rebuilding) and "explicit"
+# for HW (no host env leakage; only the few SAHC_* knobs we need).
+{% if host_env_mode == "passthrough" %}
 loader.insecure__use_host_env = true
+{% else %}
+loader.env.SAHC_REQUIRE_DCAP        = { passthrough = true }
+loader.env.SAHC_EXPECTED_MRENCLAVE  = { passthrough = true }
+{% endif %}
 
 # Workdir is inside the mounted project root so relative paths
 # (authorized_parties.json, data/sealed/) resolve correctly.
@@ -22,10 +31,25 @@ fs.mounts = [
 
 sys.enable_sigterm_injection = true
 
-sgx.debug = true
+# DuckDB query planner can recurse a few hundred frames on big plans;
+# default 256 KB stack hits the wall on AVG+WHERE. 2 MB is comfortable.
+sys.stack.size = "2M"
+
+sgx.debug = {{ debug }}
 sgx.edmm_enable = false
 sgx.enclave_size = "512M"
 sgx.max_threads = 16
+
+# Pre-fault enclave pages on startup. Hides EPC paging cost from the
+# first handshake/upload — matters for the bench numbers in HW.
+sgx.preheat_enclave = true
+
+# Versioning: bump isvsvn when shipping a security fix that should
+# invalidate older sealed blobs (sealing key derivation includes svn
+# under MRSIGNER policy; we use MRENCLAVE so it's informational here,
+# but the field is mandatory for production manifests).
+sgx.isvprodid = 1
+sgx.isvsvn    = 1
 
 # Real DCAP attestation in gramine-sgx HW. On gramine-direct the
 # /dev/attestation/* pseudo-files are absent and the backend logs
