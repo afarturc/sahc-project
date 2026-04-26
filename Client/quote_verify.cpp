@@ -34,6 +34,12 @@
 #define SAHC_HW 0
 #endif
 
+#if SAHC_HW
+#include <sgx_dcap_quoteverify.h>
+#include <sgx_quote_3.h>
+#include <time.h>
+#endif
+
 int sahc_require_dcap(void)
 {
     const char* env = getenv("SAHC_REQUIRE_DCAP");
@@ -47,19 +53,22 @@ int sahc_require_dcap(void)
     return SAHC_HW ? 1 : 0;
 }
 
-/* ---------- stage 1: structural parse ---------- */
+/* ---------- stage 1: structural parse (SAHC artesanal body) ----------
+ * Caller has already consumed the format byte; `body` points at the
+ * 260-byte SAHC-format payload. */
 
-static int verify_quote_structure(const QuoteVerifyCtx* ctx, QuoteVerifyOut* out,
+static int verify_quote_structure(const uint8_t* body, size_t body_len,
+                                  QuoteVerifyOut* out,
                                   const uint8_t** report_data_out,
                                   const uint8_t** quote_sig_out,
                                   const uint8_t** qe_identity_out)
 {
-    if (ctx->quote_len != PROTO_ATTEST_RESP_SIZE) {
-        fprintf(stderr, "quote_verify: bad payload length %zu (expected %u)\n",
-                ctx->quote_len, PROTO_ATTEST_RESP_SIZE);
+    if (body_len != PROTO_ATTEST_RESP_SAHC_BODY_SIZE) {
+        fprintf(stderr, "quote_verify: bad SAHC body length %zu (expected %u)\n",
+                body_len, PROTO_ATTEST_RESP_SAHC_BODY_SIZE);
         return -1;
     }
-    const uint8_t* p = ctx->quote;
+    const uint8_t* p = body;
     memcpy(out->mrenclave, p,      32); p += 32;
     memcpy(out->mrsigner,  p,      32); p += 32;
     out->isv_prod_id = (uint16_t)p[0] | ((uint16_t)p[1] << 8); p += 2;
@@ -221,15 +230,16 @@ static int verify_enclave_identity(const QuoteVerifyCtx* ctx,
     return 0;
 }
 
-/* ---------- entry point ---------- */
+/* ---------- SAHC artesanal verifier (format=0x00) ---------- */
 
-int quote_verify(const QuoteVerifyCtx* ctx, QuoteVerifyOut* out)
+static int verify_sahc(const QuoteVerifyCtx* ctx, QuoteVerifyOut* out,
+                       const uint8_t* body, size_t body_len)
 {
     const uint8_t* report_data = NULL;
     const uint8_t* quote_sig   = NULL;
     const uint8_t* qe_identity = NULL;
 
-    if (verify_quote_structure(ctx, out,
+    if (verify_quote_structure(body, body_len, out,
                                &report_data, &quote_sig, &qe_identity) != 0)
         return -1;
 
@@ -245,4 +255,138 @@ int quote_verify(const QuoteVerifyCtx* ctx, QuoteVerifyOut* out)
         return -1;
 
     return 0;
+}
+
+#if SAHC_HW
+/* Run the full DCAP signature/cert/TCB chain via the QvL.
+ * Accepts OK, CONFIG_NEEDED, SW_HARDENING_NEEDED and the combined
+ * variant — these are the standard "non-fatal" results that production
+ * verifiers also accept (TCB level a bit behind, but no revocation).
+ * Anything else (REVOKED, OUT_OF_DATE, INVALID_SIGNATURE, ...) is a
+ * hard reject. */
+static int verify_dcap_chain_hw(const uint8_t* quote, uint32_t qlen,
+                                sgx_ql_qv_result_t* qv_result_out)
+{
+    uint32_t supp_size = 0;
+    quote3_error_t qe = sgx_qv_get_quote_supplemental_data_size(&supp_size);
+    if (qe != SGX_QL_SUCCESS) {
+        fprintf(stderr,
+            "quote_verify: sgx_qv_get_quote_supplemental_data_size 0x%x\n", qe);
+        return -1;
+    }
+    uint8_t* supp = NULL;
+    if (supp_size) {
+        supp = (uint8_t*)malloc(supp_size);
+        if (!supp) return -1;
+    }
+    sgx_ql_qv_result_t qv_result = SGX_QL_QV_RESULT_UNSPECIFIED;
+    uint32_t coll_expir = 0;
+    qe = sgx_qv_verify_quote(quote, qlen, NULL, time(NULL),
+                             &coll_expir, &qv_result, NULL,
+                             supp_size, supp);
+    free(supp);
+    if (qe != SGX_QL_SUCCESS) {
+        fprintf(stderr, "quote_verify: sgx_qv_verify_quote 0x%x\n", qe);
+        return -1;
+    }
+    *qv_result_out = qv_result;
+    switch (qv_result) {
+        case SGX_QL_QV_RESULT_OK:
+            return 0;
+        case SGX_QL_QV_RESULT_CONFIG_NEEDED:
+        case SGX_QL_QV_RESULT_SW_HARDENING_NEEDED:
+        case SGX_QL_QV_RESULT_CONFIG_AND_SW_HARDENING_NEEDED:
+            fprintf(stderr,
+                "quote_verify: DCAP non-fatal status 0x%x — accepted\n",
+                qv_result);
+            return 0;
+        default:
+            fprintf(stderr,
+                "quote_verify: DCAP qv_result rejected 0x%x\n", qv_result);
+            return -1;
+    }
+}
+#endif /* SAHC_HW */
+
+/* ---------- DCAP verifier (format=0x01) ----------
+ * Wire envelope parsed in any build. The actual chain verification +
+ * sgx_quote3_t binding only happens when compiled with SAHC_HW=1
+ * against -lsgx_dcap_quoteverify; otherwise we refuse loudly so a SIM
+ * client can't be tricked into accepting a DCAP payload. */
+static int verify_dcap(const QuoteVerifyCtx* ctx, QuoteVerifyOut* out,
+                       const uint8_t* body, size_t body_len)
+{
+    if (body_len < PROTO_ECDH_PUB_SIZE + 4) {
+        fprintf(stderr, "quote_verify: DCAP body too short (%zu)\n", body_len);
+        return -1;
+    }
+    memcpy(out->enclave_ecdh_pub, body, PROTO_ECDH_PUB_SIZE);
+    const uint8_t* p = body + PROTO_ECDH_PUB_SIZE;
+    uint32_t qlen = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+                  | ((uint32_t)p[2] <<  8) |  (uint32_t)p[3];
+    if (qlen > PROTO_DCAP_QUOTE_MAX
+        || (size_t)PROTO_ECDH_PUB_SIZE + 4 + qlen != body_len) {
+        fprintf(stderr, "quote_verify: DCAP quote_len out of range (%u)\n", qlen);
+        return -1;
+    }
+    const uint8_t* quote = body + PROTO_ECDH_PUB_SIZE + 4;
+
+#if SAHC_HW
+    if (qlen < sizeof(sgx_quote3_t)) {
+        fprintf(stderr, "quote_verify: DCAP quote shorter than sgx_quote3_t\n");
+        return -1;
+    }
+    const sgx_quote3_t* q3 = (const sgx_quote3_t*)quote;
+    memcpy(out->mrenclave, &q3->report_body.mr_enclave, 32);
+    memcpy(out->mrsigner,  &q3->report_body.mr_signer,  32);
+    out->isv_prod_id = q3->report_body.isv_prod_id;
+    out->isv_svn     = q3->report_body.isv_svn;
+
+    sgx_ql_qv_result_t qv_result = SGX_QL_QV_RESULT_UNSPECIFIED;
+    if (verify_dcap_chain_hw(quote, qlen, &qv_result) != 0) return -1;
+
+    /* report_data binding lives in q3->report_body.report_data (64 B);
+     * we use only the first 32 B (SHA-256 size). DCAP doesn't validate
+     * this for us — it's our application-level invariant. */
+    uint8_t to_hash[16 + 64];
+    memcpy(to_hash,      ctx->nonce,            16);
+    memcpy(to_hash + 16, out->enclave_ecdh_pub, 64);
+    uint8_t expected[32];
+    SHA256(to_hash, sizeof(to_hash), expected);
+    if (memcmp(q3->report_body.report_data.d, expected, 32) != 0) {
+        fprintf(stderr, "quote_verify: DCAP report_data binding mismatch\n");
+        return -1;
+    }
+    if (verify_enclave_identity(ctx, out->mrenclave) != 0) return -1;
+    fprintf(stderr,
+        "quote_verify: DCAP chain OK + binding OK + MRENCLAVE pin OK\n");
+    return 0;
+#else
+    fprintf(stderr,
+        "quote_verify: DCAP format received (qlen=%u) but this build does "
+        "not include the DCAP verifier — rebuild with SAHC_HW=1 against "
+        "-lsgx_dcap_quoteverify. Refusing.\n", qlen);
+    return -1;
+#endif
+}
+
+/* ---------- entry point ---------- */
+
+int quote_verify(const QuoteVerifyCtx* ctx, QuoteVerifyOut* out)
+{
+    if (ctx->quote_len < 1) {
+        fprintf(stderr, "quote_verify: empty payload\n");
+        return -1;
+    }
+    uint8_t format = ctx->quote[0];
+    const uint8_t* body = ctx->quote + 1;
+    size_t body_len = ctx->quote_len - 1;
+
+    switch (format) {
+        case PROTO_QUOTE_FORMAT_SAHC: return verify_sahc(ctx, out, body, body_len);
+        case PROTO_QUOTE_FORMAT_DCAP: return verify_dcap(ctx, out, body, body_len);
+        default:
+            fprintf(stderr, "quote_verify: unknown quote format 0x%02x\n", format);
+            return -1;
+    }
 }

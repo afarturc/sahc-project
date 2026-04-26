@@ -235,8 +235,9 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
     }
     printf("Server: session handle=%u (KEX done)\n", *session_handle);
 
-    uint8_t resp[PROTO_ATTEST_RESP_SIZE];
+    uint8_t resp[PROTO_ATTEST_RESP_SAHC_SIZE];
     uint8_t* p = resp;
+    *p++ = PROTO_QUOTE_FORMAT_SAHC;
     memcpy(p, mrenclave,        32); p += 32;
     memcpy(p, mrsigner,         32); p += 32;
     put_u16_le(p, isv_prod_id);      p += 2;
@@ -246,8 +247,8 @@ static int handle_attest_req(sgx_enclave_id_t eid, int fd,
     memcpy(p, qe_identity,      32); p += 32;
     memcpy(p, enclave_ecdh_pub, PROTO_ECDH_PUB_SIZE);
 
-    printf("Server: sending ATTEST_RESP (%u bytes)\n", PROTO_ATTEST_RESP_SIZE);
-    return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SIZE);
+    printf("Server: sending ATTEST_RESP (%u bytes)\n", PROTO_ATTEST_RESP_SAHC_SIZE);
+    return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SAHC_SIZE);
 }
 
 static int handle_key_confirm(sgx_enclave_id_t eid, int fd,

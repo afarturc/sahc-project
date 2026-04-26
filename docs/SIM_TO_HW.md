@@ -86,9 +86,18 @@ Build + manifest **HW**:
 
 ```bash
 make clean
-make gramine_server
+make SAHC_HW=1 gramine_server               # emite quote DCAP real
+make SAHC_HW=1 sgx_client                   # linka -lsgx_dcap_quoteverify
 make gramine_manifest_hw                    # debug=false, host_env explícito
 ```
+
+`SAHC_HW=1` é o switch que activa o DCAP real:
+- Servidor lê `/dev/attestation/{user_report_data,quote}` e envia o
+  `sgx_quote3_t` real (formato `PROTO_QUOTE_FORMAT_DCAP=0x01`).
+- Cliente parseia o `sgx_quote3_t`, chama `sgx_qv_verify_quote()` da
+  QvL, valida cadeia + binding + MRENCLAVE pin.
+
+Pré-requisito Debian/Ubuntu: `apt install libsgx-dcap-quote-verify-dev`.
 
 Diferenças vs `gramine_manifest` (dev):
 - `sgx.debug = false` — sem inspecção `gdb-sgx`

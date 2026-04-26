@@ -144,7 +144,10 @@ int client_session_open(const char* host, int port, const char* party_id,
         fprintf(stderr, "Client: server ERROR code=%u\n", code);
         goto fail;
     }
-    if (type != MSG_ATTEST_RESP || len != PROTO_ATTEST_RESP_SIZE) {
+    /* ATTEST_RESP is variable-length now: format(1) + format-specific body.
+     * Defer the format-aware length check to quote_verify(); here we only
+     * sanity-check the type and that we have at least the format byte. */
+    if (type != MSG_ATTEST_RESP || len < 1) {
         fprintf(stderr, "Client: bad ATTEST_RESP (type=0x%02x len=%u)\n", type, len);
         goto fail;
     }

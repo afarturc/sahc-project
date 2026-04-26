@@ -1,6 +1,20 @@
 SGX_SDK ?= /opt/intel/sgxsdk
 SGX_MODE ?= SIM
 
+# SAHC_HW=1 enables the DCAP attestation path:
+#   - client links against -lsgx_dcap_quoteverify and parses sgx_quote3_t
+#   - gramine_server reads /dev/attestation/quote and emits format=DCAP
+# SGX_MODE=HW also implies SAHC_HW (build target is real Intel HW).
+SAHC_HW ?= 0
+ifeq ($(SAHC_HW), 1)
+    SAHC_HW_FLAG := -DSAHC_HW=1
+else ifeq ($(SGX_MODE), HW)
+    SAHC_HW_FLAG := -DSAHC_HW=1
+    SAHC_HW := 1
+else
+    SAHC_HW_FLAG := -DSAHC_HW=0
+endif
+
 SGX_COMMON_FLAGS := -m64
 SGX_LIBRARY_PATH := $(SGX_SDK)/lib64
 
@@ -36,14 +50,12 @@ Server_C_Objects := $(Server_C_Files:.c=.o)
 # APIs; suppress those warnings — migration is tracked separately.
 # SAHC_HW switches the default attestation policy: SIM tolerates the
 # missing DCAP signature chain, HW requires it (overridable at runtime
-# via SAHC_REQUIRE_DCAP=0|1).
-ifeq ($(SGX_MODE), HW)
-    Client_HW_Flag := -DSAHC_HW=1
-else
-    Client_HW_Flag := -DSAHC_HW=0
-endif
-Client_C_Flags := $(Untrusted_C_Flags) -Wno-deprecated-declarations $(Client_HW_Flag)
+# via SAHC_REQUIRE_DCAP=0|1) AND links the DCAP QvL.
+Client_C_Flags := $(Untrusted_C_Flags) -Wno-deprecated-declarations $(SAHC_HW_FLAG)
 Client_Link_Flags := -lpthread -lcrypto
+ifeq ($(SAHC_HW), 1)
+    Client_Link_Flags += -lsgx_dcap_quoteverify
+endif
 
 Client_Cpp_Files := Client/client_main.cpp Client/session.cpp \
     Client/quote_verify.cpp Client/identity.cpp Client/secure_frame.cpp \
@@ -165,7 +177,7 @@ sgx_bench_bin: $(Bench_Cpp_Objects)
 # Built standalone, no SGX SDK runtime; meant to run under
 # gramine-direct (smoke) or gramine-sgx (production).
 Gramine_C_Flags := $(SGX_COMMON_FLAGS) -fPIC -Wall -Wno-attributes \
-    -IInclude -ICommon -IServer -IEnclaveLogic
+    -IInclude -ICommon -IServer -IEnclaveLogic $(SAHC_HW_FLAG)
 Gramine_Link_Flags := -lpthread -lcrypto
 
 Gramine_Cpp_Files := Gramine/server_main.cpp \

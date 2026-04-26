@@ -28,6 +28,64 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifndef SAHC_HW
+#define SAHC_HW 0
+#endif
+
+#if SAHC_HW
+/* Read a real Intel DCAP quote from Gramine's pseudo-files.
+ *
+ *   /dev/attestation/user_report_data : write-only, 64 B raw
+ *   /dev/attestation/quote            : read-only, returns sgx_quote3_t
+ *
+ * The first 32 B of user_report_data carry our SHA256(nonce ||
+ * enclave_ecdh_pub) binding; the remaining 32 B are zero-padding.
+ * After the write, the next read on /dev/attestation/quote returns a
+ * fresh DCAP quote that embeds those report_data bytes inside
+ * sgx_report_body_t. Only meaningful under gramine-sgx — under
+ * gramine-direct the pseudo-files are absent and this returns -1. */
+static int read_dcap_quote(const uint8_t user_data32[32],
+                           uint8_t* out, size_t out_cap, size_t* out_len)
+{
+    int wfd = open("/dev/attestation/user_report_data", O_WRONLY);
+    if (wfd < 0) {
+        fprintf(stderr, "DCAP: open user_report_data failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    uint8_t urd[64];
+    memcpy(urd, user_data32, 32);
+    memset(urd + 32, 0, 32);
+    ssize_t w = write(wfd, urd, sizeof(urd));
+    close(wfd);
+    if (w != (ssize_t)sizeof(urd)) {
+        fprintf(stderr, "DCAP: write user_report_data short (%zd)\n", w);
+        return -1;
+    }
+
+    int rfd = open("/dev/attestation/quote", O_RDONLY);
+    if (rfd < 0) {
+        fprintf(stderr, "DCAP: open quote failed: %s\n", strerror(errno));
+        return -1;
+    }
+    size_t total = 0;
+    while (total < out_cap) {
+        ssize_t n = read(rfd, out + total, out_cap - total);
+        if (n < 0) {
+            fprintf(stderr, "DCAP: read quote failed: %s\n", strerror(errno));
+            close(rfd); return -1;
+        }
+        if (n == 0) break;
+        total += (size_t)n;
+    }
+    close(rfd);
+    if (total == 0) { fprintf(stderr, "DCAP: empty quote\n"); return -1; }
+    *out_len = total;
+    fprintf(stderr, "DCAP: quote read OK (%zu bytes)\n", total);
+    return 0;
+}
+#endif /* SAHC_HW */
+
 #define PARTIES_FILE "authorized_parties.json"
 #define SEALED_DIR   "data/sealed"
 #define SEALED_FILE  "data/sealed/state.bin"
@@ -187,8 +245,37 @@ static int handle_attest_req(int fd, const uint8_t* payload, uint32_t len,
         return -1;
     }
 
-    uint8_t resp[PROTO_ATTEST_RESP_SIZE];
+#if SAHC_HW
+    /* DCAP path: ignore the artesanal mrenclave/mrsigner/quote_sig/
+     * qe_identity outputs (we read the real values from
+     * /dev/attestation/quote) and emit format=DCAP. user_data32 was
+     * computed as SHA256(nonce || enclave_ecdh_pub) by sahc_attest_begin
+     * — that's the binding we want in the quote's report_data. */
+    uint8_t  quote_buf[PROTO_DCAP_QUOTE_MAX];
+    size_t   quote_len = 0;
+    if (read_dcap_quote(user_data, quote_buf, sizeof(quote_buf), &quote_len) != 0) {
+        send_error(fd, E_INTERNAL);
+        return -1;
+    }
+    size_t resp_len = PROTO_ATTEST_RESP_DCAP_HEADER_SIZE + quote_len;
+    uint8_t* resp = (uint8_t*)malloc(resp_len);
+    if (!resp) { send_error(fd, E_INTERNAL); return -1; }
     uint8_t* p = resp;
+    *p++ = PROTO_QUOTE_FORMAT_DCAP;
+    memcpy(p, enclave_ecdh_pub, PROTO_ECDH_PUB_SIZE); p += PROTO_ECDH_PUB_SIZE;
+    p[0] = (uint8_t)(quote_len >> 24);
+    p[1] = (uint8_t)(quote_len >> 16);
+    p[2] = (uint8_t)(quote_len >>  8);
+    p[3] = (uint8_t)(quote_len);
+    p += 4;
+    memcpy(p, quote_buf, quote_len);
+    int rc_send = frame_send(fd, MSG_ATTEST_RESP, resp, resp_len);
+    free(resp);
+    return rc_send;
+#else
+    uint8_t resp[PROTO_ATTEST_RESP_SAHC_SIZE];
+    uint8_t* p = resp;
+    *p++ = PROTO_QUOTE_FORMAT_SAHC;
     memcpy(p, mrenclave,        32); p += 32;
     memcpy(p, mrsigner,         32); p += 32;
     put_u16_le(p, isv_prod_id);      p += 2;
@@ -197,8 +284,8 @@ static int handle_attest_req(int fd, const uint8_t* payload, uint32_t len,
     memcpy(p, quote_sig,        64); p += 64;
     memcpy(p, qe_identity,      32); p += 32;
     memcpy(p, enclave_ecdh_pub, PROTO_ECDH_PUB_SIZE);
-
-    return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SIZE);
+    return frame_send(fd, MSG_ATTEST_RESP, resp, PROTO_ATTEST_RESP_SAHC_SIZE);
+#endif
 }
 
 static int handle_key_confirm(int fd, const uint8_t* payload, uint32_t len,

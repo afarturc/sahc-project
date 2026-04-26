@@ -49,19 +49,44 @@
 #define PROTO_ECDH_PUB_SIZE 64
 #define PROTO_SIG_SIZE     64
 
-// ATTEST_RESP payload: serialized quote followed by enclave_ecdh_pub(64).
+// ATTEST_RESP payload: format(1) | format-specific body.
 //
-// Serialized quote layout (little-endian, native):
-//   mrenclave(32) | mrsigner(32) | isv_prod_id(2) | isv_svn(2)
-//   | user_data(32) | signature(64) | qe_identity(32)
+//   format == PROTO_QUOTE_FORMAT_SAHC (0x00):
+//     mrenclave(32) | mrsigner(32) | isv_prod_id(2) | isv_svn(2)
+//     | user_data(32) | signature(64) | qe_identity(32)
+//     | enclave_ecdh_pub(64)
+//     Total wire size: 1 + 260 = 261 bytes.
+//
+//   format == PROTO_QUOTE_FORMAT_DCAP (0x01):
+//     enclave_ecdh_pub(64) | quote_len(4 BE) | quote(quote_len)
+//     The quote is a real Intel sgx_quote3_t — variable size, typically
+//     ~4 KB on HW with the PCK cert chain embedded.
+//     Total wire size: 1 + 64 + 4 + quote_len.
+//
+// Format choice is decided at server compile time:
+//   SAHC by default (works in SIM and gramine-direct);
+//   DCAP when servers/clients are built with -DSAHC_HW=1 against the
+//   Intel DCAP libraries.
+#define PROTO_QUOTE_FORMAT_SAHC    0x00
+#define PROTO_QUOTE_FORMAT_DCAP    0x01
+
 #define PROTO_QUOTE_MRENCLAVE_SIZE 32
 #define PROTO_QUOTE_MRSIGNER_SIZE  32
 #define PROTO_QUOTE_USER_DATA_SIZE 32
 #define PROTO_QUOTE_SIG_SIZE       64
 #define PROTO_QUOTE_QE_ID_SIZE     32
-#define PROTO_QUOTE_SIZE           (32 + 32 + 2 + 2 + 32 + 64 + 32)
 
-#define PROTO_ATTEST_RESP_SIZE     (PROTO_QUOTE_SIZE + PROTO_ECDH_PUB_SIZE)
+// SAHC-format body (everything after the format byte).
+#define PROTO_ATTEST_RESP_SAHC_BODY_SIZE \
+    (32 + 32 + 2 + 2 + 32 + 64 + 32 + PROTO_ECDH_PUB_SIZE)
+#define PROTO_ATTEST_RESP_SAHC_SIZE  (1 + PROTO_ATTEST_RESP_SAHC_BODY_SIZE)
+
+// Sanity cap for the DCAP variable-length quote field.
+#define PROTO_DCAP_QUOTE_MAX  16384u
+#define PROTO_ATTEST_RESP_DCAP_HEADER_SIZE \
+    (1 + PROTO_ECDH_PUB_SIZE + 4)
+#define PROTO_ATTEST_RESP_DCAP_MAX \
+    (PROTO_ATTEST_RESP_DCAP_HEADER_SIZE + PROTO_DCAP_QUOTE_MAX)
 
 // KEY_CONFIRM payload: HMAC-SHA256(session_key, "confirm")
 #define PROTO_KEY_CONFIRM_SIZE 32
