@@ -110,7 +110,8 @@ Enclave/Enclave.o: Enclave/Enclave.cpp Enclave/Enclave_t.c
 Enclave_Logic_Cpp := EnclaveLogic/enclave_logic.cpp \
     EnclaveLogic/crypto_backend_sgx.cpp \
     EnclaveLogic/identity_backend_sgx.cpp \
-    EnclaveLogic/seal_backend_sgx.cpp
+    EnclaveLogic/seal_backend_sgx.cpp \
+    EnclaveLogic/query_engine_artisanal.cpp
 Enclave_Logic_Obj := $(Enclave_Logic_Cpp:.cpp=.o)
 
 EnclaveLogic/%.o: EnclaveLogic/%.cpp
@@ -172,10 +173,30 @@ Gramine_Cpp_Files := Gramine/server_main.cpp \
     EnclaveLogic/crypto_backend_openssl.cpp \
     EnclaveLogic/identity_backend_gramine.cpp \
     EnclaveLogic/seal_backend_gramine.cpp \
+    EnclaveLogic/query_engine_duckdb.cpp \
     Server/parties_loader.cpp \
     Common/framing.cpp Common/tcp_util.cpp
 Gramine_Cpp_Objects := $(Gramine_Cpp_Files:.cpp=.gramine.o)
 Gramine_C_Objects   := Common/third_party/cJSON.gramine.o
+
+# DuckDB ships a precompiled libduckdb.so in their release bundle —
+# we use that instead of compiling the 20 MB amalgamation. The .so
+# lives next to the headers under Common/third_party/duckdb/. For
+# gramine-sgx HW the .so must be added to sgx.trusted_files in the
+# manifest so its hash is measured at load time.
+Duckdb_Dir       := Common/third_party/duckdb
+# $ORIGIN-relative rpath: resolves to the binary's directory at load
+# time. Works both on the host (project root) and inside Gramine
+# (project mounted as /sahc), so we don't need to pin an absolute path.
+Duckdb_Link      := -L$(Duckdb_Dir) -lduckdb \
+                    -Wl,-rpath,'$$ORIGIN/$(Duckdb_Dir)'
+
+# query_engine_duckdb needs the DuckDB header on its include path.
+EnclaveLogic/query_engine_duckdb.gramine.o: EnclaveLogic/query_engine_duckdb.cpp \
+                                            EnclaveLogic/query_engine.h \
+                                            Common/third_party/duckdb/duckdb.hpp
+	g++ $(Gramine_C_Flags) -std=c++17 -D_GLIBCXX_USE_CXX11_ABI=0 \
+	    -I$(Duckdb_Dir) -c $< -o $@
 
 %.gramine.o: %.cpp
 	g++ $(Gramine_C_Flags) -c $< -o $@
@@ -183,9 +204,15 @@ Gramine_C_Objects   := Common/third_party/cJSON.gramine.o
 %.gramine.o: %.c
 	gcc $(Gramine_C_Flags) -c $< -o $@
 
-gramine_server: $(Gramine_Cpp_Objects) $(Gramine_C_Objects)
-	g++ $(Gramine_Cpp_Objects) $(Gramine_C_Objects) -o gramine_server \
-		$(Gramine_Link_Flags)
+# Trigger the fetch script if libduckdb.so is missing — fresh checkouts
+# don't have the .so (gitignored, ~57 MB).
+$(Duckdb_Dir)/libduckdb.so:
+	./scripts/fetch_duckdb.sh
+
+gramine_server: $(Gramine_Cpp_Objects) $(Gramine_C_Objects) \
+                $(Duckdb_Dir)/libduckdb.so
+	g++ $(Gramine_Cpp_Objects) $(Gramine_C_Objects) \
+	    -o gramine_server $(Gramine_Link_Flags) $(Duckdb_Link)
 
 # Render the manifest with substitutions; sign for gramine-sgx so HW runs
 # work too (gramine-direct only needs the unsigned .manifest). Run from

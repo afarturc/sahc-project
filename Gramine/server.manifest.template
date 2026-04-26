@@ -41,6 +41,7 @@ sgx.trusted_files = [
   "file:/etc/ssl/",
   "file:{{ project_root }}/gramine_server",
   "file:{{ project_root }}/authorized_parties.json",
+  "file:{{ project_root }}/Common/third_party/duckdb/libduckdb.so",
 ]
 
 # Sealed state file is mutable and machine-bound — not in trusted_files.

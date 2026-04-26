@@ -1,6 +1,10 @@
 # Build artifacts
 *.o
 *.so
+
+# DuckDB amalgamation/bundle is fetched by scripts/fetch_duckdb.sh on
+# first build — never tracked.
+Common/third_party/duckdb/
 *.a
 app
 sgx_server

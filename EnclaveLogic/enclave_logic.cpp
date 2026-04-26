@@ -16,6 +16,7 @@
 #include "identity_backend.h"
 #include "seal_backend.h"
 #include "mutex_compat.h"
+#include "query_engine.h"
 
 #include "patient.h"          /* PatientRecord, FIELD_*, QUERY_* */
 #include "protocol.h"         /* K_ANON_THRESHOLD, MSG_*, PROTO_* */
@@ -662,36 +663,25 @@ extern "C" int sahc_query(uint32_t handle,
 
     if (field > FIELD_BLOOD_SUGAR || query_type > QUERY_COUNT) return -9;
 
-    float    sum = 0.0f, mn = 1e30f, mx = -1e30f;
-    uint32_t matched = 0;
-
+    /* Snapshot under the lock, then run the engine outside it. The
+     * DuckDB backend can take milliseconds on large datasets — holding
+     * records_mutex for that whole window would block uploads. */
     sahc_mutex_lock(&records_mutex);
-    for (size_t i = 0; i < total_records; i++) {
-        if (filter >= 0 && all_records[i].diagnosis != (uint32_t)filter) continue;
-        float v = 0.0f;
-        switch (field) {
-            case FIELD_AGE:         v = (float)all_records[i].age; break;
-            case FIELD_TEMPERATURE: v = all_records[i].temperature; break;
-            case FIELD_BLOOD_SUGAR: v = all_records[i].blood_sugar; break;
-        }
-        sum += v;
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-        matched++;
-    }
+    size_t snap_n = total_records;
+    PatientRecord snap[MAX_RECORDS_TOTAL];
+    if (snap_n > 0) memcpy(snap, all_records, snap_n * sizeof(PatientRecord));
     sahc_mutex_unlock(&records_mutex);
+
+    float    result  = 0.0f;
+    uint32_t matched = 0;
+    if (query_engine_run(snap, snap_n, field, query_type, filter,
+                         &result, &matched) != 0) {
+        return -9;
+    }
 
     if (matched < K_ANON_THRESHOLD) {
         LOG("Enclave: QUERY refused (k-anonymity)\n");
         return -10;
-    }
-
-    float result = 0.0f;
-    switch (query_type) {
-        case QUERY_AVG:   result = sum / (float)matched; break;
-        case QUERY_MIN:   result = mn; break;
-        case QUERY_MAX:   result = mx; break;
-        case QUERY_COUNT: result = (float)matched; break;
     }
 
     uint8_t resp_pt[PROTO_QUERY_RESP_SIZE];
