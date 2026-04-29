@@ -178,7 +178,7 @@ SAHC_REQUIRE_DCAP=1 ./sgx_client 127.0.0.1 7878 fcup-research - age avg any
 ```
 
 Esperado em cada cliente: `quote_verify: DCAP chain OK + binding OK +
-MRENCLAVE pin OK`. Query final: `result=49.143 matched=15 applied_k=5`.
+MRENCLAVE pin OK`. Query final: `result=49.143 matched=14 applied_k=5`.
 
 A partir daqui seguir [`HW.md`](HW.md) §B.3 (negativos), §B.5
 (persistência), §6 (bench).
