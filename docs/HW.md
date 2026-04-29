@@ -45,13 +45,20 @@ source /opt/intel/sgxsdk/environment
 gramine-sgx-gen-private-key           # se ainda não existir
 
 make clean
-make SGX_MODE=HW                       # SDK path: sgx_server, sgx_client, enclave
-make SAHC_HW=1 gramine_server          # Gramine path: emite DCAP real
-make gramine_manifest_hw               # debug=false, host_env explícito; assina
+make hw                                # all-in-one: SDK + Gramine + assina + pin Gramine
 ```
 
-**Esperado:** todos os comandos terminam com exit 0. O Makefile
-regenera `Include/expected_mrenclave.h` automaticamente.
+`make hw` é equivalente a:
+```bash
+make SGX_MODE=HW SAHC_HW=1 gramine_server gramine_manifest_hw
+make SGX_MODE=HW SAHC_HW=1 sgx_server sgx_client
+```
+e regenera `Include/expected_mrenclave_gramine.h` (extraído de
+`gramine_server.sig`) — é com este pin que o cliente compara em HW.
+
+**Esperado:** todos os comandos terminam com exit 0. Para builds
+incrementais durante desenvolvimento, as variantes detalhadas
+continuam a funcionar isoladamente.
 
 `SAHC_HW=1` activa o switch DCAP:
 - Servidor Gramine lê `/dev/attestation/{user_report_data,quote}` e
