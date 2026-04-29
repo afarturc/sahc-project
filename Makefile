@@ -80,9 +80,16 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs \
     -Wl,-pie,-eenclave_entry -Wl,--export-dynamic \
     -Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
-.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave gramine_server gramine_manifest gramine_manifest_hw sahc_smoke
+.PHONY: all clean enclave sgx_server sgx_client sgx_bench mrenclave gramine_server gramine_manifest gramine_manifest_hw sahc_smoke hw
 
 all: sgx_server sgx_client enclave Include/expected_mrenclave.h
+
+# All-in-one HW build: SDK enclave + Gramine manifest + sgx_client pinned
+# against the Gramine MRENCLAVE (the one that actually runs under DCAP).
+# Use as: `make hw` (implies SGX_MODE=HW SAHC_HW=1).
+hw:
+	$(MAKE) SGX_MODE=HW SAHC_HW=1 gramine_server gramine_manifest_hw
+	$(MAKE) SGX_MODE=HW SAHC_HW=1 sgx_server sgx_client
 
 sgx_bench: sgx_bench_bin
 
@@ -92,6 +99,11 @@ sgx_bench: sgx_bench_bin
 # needed, so the client can be cross-built on a machine without SGX.
 Include/expected_mrenclave.h: enclave.signed.so scripts/extract_mrenclave.sh
 	./scripts/extract_mrenclave.sh
+
+# Gramine-side pin: extracted from gramine_server.sig (different MRENCLAVE
+# from the SDK enclave). Client uses this when built with SAHC_HW=1.
+Include/expected_mrenclave_gramine.h: gramine_server.sig scripts/extract_gramine_mrenclave.sh
+	./scripts/extract_gramine_mrenclave.sh
 
 mrenclave: Include/expected_mrenclave.h
 
@@ -145,7 +157,13 @@ Enclave_u.o: Enclave_u.c
 Server/%.o: Server/%.cpp Enclave_u.c
 	g++ $(Server_C_Flags) -c $< -o $@
 
-Client/%.o: Client/%.cpp Include/expected_mrenclave.h
+ifeq ($(SAHC_HW),1)
+CLIENT_PIN_HDR := Include/expected_mrenclave_gramine.h
+else
+CLIENT_PIN_HDR := Include/expected_mrenclave.h
+endif
+
+Client/%.o: Client/%.cpp $(CLIENT_PIN_HDR)
 	g++ $(Client_C_Flags) -c $< -o $@
 
 Common/%.o: Common/%.cpp
@@ -167,7 +185,7 @@ Bench_Cpp_Files := Bench/bench.cpp Client/session.cpp Client/quote_verify.cpp \
     Common/framing.cpp Common/tcp_util.cpp
 Bench_Cpp_Objects := $(Bench_Cpp_Files:.cpp=.o)
 
-Bench/%.o: Bench/%.cpp Include/expected_mrenclave.h
+Bench/%.o: Bench/%.cpp $(CLIENT_PIN_HDR)
 	g++ $(Client_C_Flags) -IClient -c $< -o $@
 
 sgx_bench_bin: $(Bench_Cpp_Objects)
@@ -249,7 +267,9 @@ gramine_manifest: gramine_server Gramine/server.manifest.template
 		--output   gramine_server.manifest.sgx \
 		|| echo "(gramine-sgx-sign skipped — fine if no signing key)"
 
-gramine_manifest_hw: gramine_server Gramine/server.manifest.template
+gramine_manifest_hw: gramine_server.sig
+
+gramine_server.sig gramine_server.manifest.sgx: gramine_server Gramine/server.manifest.template
 	gramine-manifest \
 		-Dlog_level=error \
 		-Darch_libdir=/lib/x86_64-linux-gnu \
@@ -280,4 +300,5 @@ clean:
 		gramine_server.manifest gramine_server.manifest.sgx \
 		gramine_server.sig \
 		Enclave/Enclave_t.* Enclave_u.* \
-		Include/expected_mrenclave.h
+		Include/expected_mrenclave.h \
+		Include/expected_mrenclave_gramine.h

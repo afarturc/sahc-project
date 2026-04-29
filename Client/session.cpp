@@ -15,7 +15,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#if SAHC_HW
+#include "expected_mrenclave_gramine.h"
+#else
 #include "expected_mrenclave.h"
+#endif
 
 #define RECV_BUF_CAP       (32 * 1024)
 #define MAX_CLIENT_RECORDS 1024
