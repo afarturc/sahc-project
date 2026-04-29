@@ -147,9 +147,10 @@ static int verify_qe_signature_chain(const QuoteVerifyCtx* ctx,
      *   return 0;
      */
     fprintf(stderr,
-        "quote_verify: DCAP chain verification required but this build "
-        "doesn't include the DCAP QvL — rebuild with SAHC_HW=1 against "
-        "-lsgx_dcap_quoteverify and provide a PCCS endpoint.\n");
+        "quote_verify: server returned SAHC artisanal quote but "
+        "SAHC_REQUIRE_DCAP=1. The SAHC format has no PCK chain to validate "
+        "— only gramine_server (built with SAHC_HW=1) emits real DCAP "
+        "quotes. Refusing.\n");
     return -1;
 }
 
@@ -363,9 +364,10 @@ static int verify_dcap(const QuoteVerifyCtx* ctx, QuoteVerifyOut* out,
     return 0;
 #else
     fprintf(stderr,
-        "quote_verify: DCAP format received (qlen=%u) but this build does "
-        "not include the DCAP verifier — rebuild with SAHC_HW=1 against "
-        "-lsgx_dcap_quoteverify. Refusing.\n", qlen);
+        "quote_verify: DCAP quote received (qlen=%u) but this client was "
+        "built with SAHC_HW=0 and has no DCAP verifier linked — rebuild "
+        "client with SAHC_HW=1 against -lsgx_dcap_quoteverify. Refusing.\n",
+        qlen);
     return -1;
 #endif
 }
