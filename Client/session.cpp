@@ -101,7 +101,7 @@ int client_session_open(const char* host, int port, const char* party_id,
 
     int fd = tcp_connect(host, port);
     if (fd < 0) { identity_free(eph_priv); identity_free(lt_key); return -1; }
-    tcp_set_timeout(fd, 30, 30);
+    tcp_set_timeout(fd, 600, 600);
     VLOG(verbose, "Client: connected to %s:%d (party=%s)\n", host, port, party_id);
 
     uint8_t nonce[PROTO_NONCE_SIZE];

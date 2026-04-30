@@ -481,7 +481,7 @@ int main(int argc, char** argv)
     while (!g_stop) {
         int conn_fd = tcp_accept(listen_fd);
         if (conn_fd < 0) { if (g_stop) break; continue; }
-        tcp_set_timeout(conn_fd, 30, 30);
+        tcp_set_timeout(conn_fd, 600, 600);
 
         ConnArgs* args = (ConnArgs*)malloc(sizeof(*args));
         if (!args) { close(conn_fd); continue; }
