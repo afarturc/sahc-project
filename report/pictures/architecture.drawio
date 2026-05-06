@@ -1,0 +1,199 @@
+<mxfile host="app.diagrams.net" modified="2026-05-05T00:00:00.000Z" agent="Claude" version="21.0.0" type="device">
+  <diagram id="sahc-m2-arch" name="Arquitetura Milestone 2">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1300" pageHeight="780" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ========================================================== -->
+        <!-- LADO CLIENTE                                                 -->
+        <!-- ========================================================== -->
+        <mxCell id="zone_client" value="sgx_client (Hospital ou Researcher)" style="swimlane;whiteSpace=wrap;html=1;dashed=1;fontStyle=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="270" height="660" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli_repl" value="REPL / Single-Shot CLI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="zone_client">
+          <mxGeometry x="35" y="50" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli_csv" value="CSV Loader&#xa;(registos do hospital)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="zone_client">
+          <mxGeometry x="80" y="125" width="110" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli_identity" value="Identity (ECDSA P-256)&#xa;parties/&lt;id&gt;.{key,pub}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_client">
+          <mxGeometry x="35" y="220" width="200" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli_quote" value="Quote Verify&#xa;(MRENCLAVE pin + DCAP QVL)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_client">
+          <mxGeometry x="35" y="305" width="200" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli_secframe" value="Secure Frame&#xa;ECDH P-256 + HKDF + AES-GCM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="zone_client">
+          <mxGeometry x="35" y="395" width="200" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli_session" value="Session State&#xa;(sequence numbers, role)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="zone_client">
+          <mxGeometry x="35" y="480" width="200" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cli_framing" value="Framing + TCP" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="zone_client">
+          <mxGeometry x="55" y="565" width="160" height="45" as="geometry" />
+        </mxCell>
+
+        <!-- ========================================================== -->
+        <!-- CANAL                                                        -->
+        <!-- ========================================================== -->
+        <mxCell id="lbl_channel" value="Canal Seguro sobre TCP&#xa;Pré-KEX em claro&#xa;Pós-KEX AEAD AES-GCM&#xa;com sequence numbers" style="text;html=1;align=center;verticalAlign=middle;fontStyle=2;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="335" y="370" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="net_arrow" style="endArrow=classic;startArrow=classic;html=1;strokeWidth=3;strokeColor=#0050ef;" edge="1" parent="1" source="cli_framing" target="srv_framing">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="430" y="585" />
+              <mxPoint x="430" y="585" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ========================================================== -->
+        <!-- MÁQUINA CLOUD                                                -->
+        <!-- ========================================================== -->
+        <mxCell id="zone_cloud" value="Máquina Cloud (Azure DCsv3)" style="swimlane;whiteSpace=wrap;html=1;dashed=1;fontStyle=1;startSize=30;fillColor=#fafafa;strokeColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="540" y="60" width="730" height="660" as="geometry" />
+        </mxCell>
+
+        <!-- ----- Processo Servidor (não confiável) ----- -->
+        <mxCell id="zone_srv" value="sgx_server (processo não confiável)" style="swimlane;whiteSpace=wrap;html=1;dashed=1;fontStyle=1;startSize=26;fillColor=#fbe5d6;strokeColor=#d79b00;" vertex="1" parent="zone_cloud">
+          <mxGeometry x="20" y="40" width="690" height="600" as="geometry" />
+        </mxCell>
+
+        <mxCell id="srv_framing" value="Framing + TCP listener" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="zone_srv">
+          <mxGeometry x="20" y="525" width="170" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="srv_dispatcher" value="server_main&#xa;(accept, dispatcher, slots)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbe5d6;strokeColor=#d79b00;" vertex="1" parent="zone_srv">
+          <mxGeometry x="20" y="445" width="170" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="srv_parties_file" value="authorized_parties.json&#xa;(curado pelo administrador)" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="zone_srv">
+          <mxGeometry x="500" y="455" width="170" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="srv_sealed_file" value="data/sealed/state.bin&#xa;(blob selado)" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="zone_srv">
+          <mxGeometry x="500" y="525" width="170" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- ----- Enclave SGX ----- -->
+        <mxCell id="zone_enclave" value="Enclave SGX (Trusted, MRENCLAVE pinned)" style="swimlane;whiteSpace=wrap;html=1;fontStyle=1;startSize=26;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="zone_srv">
+          <mxGeometry x="20" y="40" width="650" height="395" as="geometry" />
+        </mxCell>
+
+        <!-- Trusted Core -->
+        <mxCell id="zone_core" value="Trusted Core (EnclaveLogic, C neutro)" style="swimlane;whiteSpace=wrap;html=1;fontStyle=1;startSize=22;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_enclave">
+          <mxGeometry x="15" y="35" width="305" height="345" as="geometry" />
+        </mxCell>
+
+        <mxCell id="core_sessions" value="Session Manager&#xa;(slots, KEX, role)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_core">
+          <mxGeometry x="20" y="35" width="265" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="core_parties" value="Parties Loader&#xa;(quorum verify, M=2)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_core">
+          <mxGeometry x="20" y="105" width="265" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="core_secchan" value="Secure Channel&#xa;(HKDF, AEAD, sequence numbers)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_core">
+          <mxGeometry x="20" y="175" width="265" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="core_kanon" value="Role Enforcement + k-anonymity (k=5)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_core">
+          <mxGeometry x="20" y="245" width="265" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="core_records" value="Registos in-memory" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="zone_core">
+          <mxGeometry x="100" y="295" width="105" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Backends grid -->
+        <mxCell id="zone_backends" value="Backends Intercambiáveis" style="swimlane;whiteSpace=wrap;html=1;fontStyle=1;startSize=22;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="zone_enclave">
+          <mxGeometry x="335" y="35" width="300" height="345" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hdr_sdk" value="SGX SDK" style="text;html=1;align=center;verticalAlign=middle;fontStyle=1;fontColor=#444444;" vertex="1" parent="zone_backends">
+          <mxGeometry x="40" y="30" width="115" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="hdr_gramine" value="Gramine" style="text;html=1;align=center;verticalAlign=middle;fontStyle=1;fontColor=#444444;" vertex="1" parent="zone_backends">
+          <mxGeometry x="160" y="30" width="115" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Crypto -->
+        <mxCell id="be_crypto_sdk" value="crypto&#xa;sgx_tcrypto" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="40" y="60" width="115" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="be_crypto_gramine" value="crypto&#xa;OpenSSL" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="160" y="60" width="115" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Identity -->
+        <mxCell id="be_id_sdk" value="identity&#xa;sgx_tcrypto" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="40" y="125" width="115" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="be_id_gramine" value="identity&#xa;OpenSSL ECDSA" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="160" y="125" width="115" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- Seal -->
+        <mxCell id="be_seal_sdk" value="seal&#xa;sgx_seal_data&#xa;(MRENCLAVE-bound)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="40" y="190" width="115" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="be_seal_gramine" value="seal&#xa;Gramine sealed-key&#xa;(MRENCLAVE-bound)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="160" y="190" width="115" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- Query -->
+        <mxCell id="be_q_sdk" value="query_engine&#xa;artesanal&#xa;(AVG/MIN/MAX/COUNT)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="40" y="265" width="115" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="be_q_gramine" value="query_engine&#xa;DuckDB embed&#xa;(SQL allowlist)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="zone_backends">
+          <mxGeometry x="160" y="265" width="115" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- ============ Setas: dispatcher → enclave ============ -->
+        <mxCell id="edge_disp_core" style="endArrow=classic;html=1;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="zone_srv" source="srv_dispatcher" target="core_kanon">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Setas dispatcher → ficheiros host -->
+        <mxCell id="edge_parties_load" value="bytes opacos" style="endArrow=classic;html=1;strokeColor=#666666;dashed=1;" edge="1" parent="zone_srv" source="srv_parties_file" target="srv_dispatcher">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_seal_load" value="bytes opacos" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#666666;dashed=1;" edge="1" parent="zone_srv" source="srv_sealed_file" target="srv_dispatcher">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Seta dispatcher → framing -->
+        <mxCell id="edge_disp_framing" style="endArrow=classic;startArrow=classic;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="zone_srv" source="srv_dispatcher" target="srv_framing">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============ Legenda ============ -->
+        <mxCell id="legend_box" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#bbbbbb;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="730" width="1230" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lg1" value="Verde, Trusted Core neutro" style="text;html=1;fontColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="735" width="220" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg2" value="Amarelo, backends da plataforma" style="text;html=1;fontColor=#d6b656;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="290" y="735" width="260" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3" value="Laranja, processo host não confiável" style="text;html=1;fontColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="560" y="735" width="270" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg4" value="Azul, fronteira de confiança SGX" style="text;html=1;fontColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="840" y="735" width="260" height="20" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

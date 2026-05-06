@@ -1,0 +1,56 @@
+\documentclass[11pt]{article}
+
+% --------------------------------------------------------
+% XeLaTeX/LuaLaTeX-only packages
+% --------------------------------------------------------
+\usepackage{fontspec}
+
+% Choose ONE language
+\usepackage[portuguese]{babel}
+
+% --------------------------------------------------------
+% General packages
+% --------------------------------------------------------
+\usepackage{amsmath, amsfonts, amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{adjustbox}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{float}
+\usepackage[colorinlistoftodos]{todonotes}
+\usepackage[nottoc,numbib]{tocbibind}
+\usepackage[margin=1.2in]{geometry}
+\usepackage{xurl}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+
+\setmainfont[
+  BoldFont={RobotoCondensed-Bold},
+  ItalicFont={RobotoCondensed-LightItalic},
+  BoldItalicFont={RobotoCondensed-BoldItalic},
+]{Roboto-Light}
+
+\renewcommand{\baselinestretch}{1.3}
+
+% Cada \section começa numa página nova.
+\let\oldsection\section
+\renewcommand{\section}{\clearpage\oldsection}
+
+\begin{document}
+
+\input{cover}
+
+\tableofcontents
+\newpage
+
+\input{content}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
