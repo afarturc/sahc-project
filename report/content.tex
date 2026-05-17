@@ -107,15 +107,33 @@ Os parágrafos seguintes estruturam o modelo em duas vistas. A primeira enumera 
 \paragraph{Ataques considerados.}
 
 \begin{description}
-  \item[A1, leitura de memória do processo servidor.] Um operador com privilégios de root no host pode invocar \texttt{ptrace}, ler \texttt{/proc/<pid>/mem} ou anexar um debugger. \emph{Mitigação.} Os registos clínicos e as chaves de sessão residem exclusivamente em páginas EPC, cifradas e autenticadas pelo processador. Qualquer leitura fora do enclave devolve apenas ciphertext sem utilidade.
-  \item[A2, manipulação de tráfego de rede.] Um adversário em posição de man-in-the-middle pode intercetar, modificar, reordenar ou repetir mensagens entre cliente e servidor. \emph{Mitigação.} Canal AEAD com AES-128-GCM, sequence numbers monotónicos por sentido e tipo da mensagem coberto pela AAD, descritos na secção~5.3.
-  \item[A3, impersonação de enclave.] Um adversário pode tentar substituir o enclave legítimo por código arbitrário em user-space, ou fazer downgrade de uma execução em hardware para simulação. \emph{Mitigação.} Atestação remota com quote DCAP no caminho HW, MRENCLAVE pinned a partir do binário assinado, recusa explícita de quotes SAHC quando o cliente exige DCAP (secção~6.4).
-  \item[A4, replay ou substituição do quote.] O adversário pode tentar reutilizar um quote produzido para uma sessão anterior, ou intercalar a sua própria chave pública efémera no \texttt{ATTEST\_RESP}. \emph{Mitigação.} O \texttt{report\_data} do quote carrega \texttt{SHA-256(nonce $\|$ enclave\_ecdh\_pub)}, o que vincula o quote ao nonce escolhido pelo cliente e à chave efémera do enclave, descrito na secção~5.2.
-  \item[A5, impersonação de cliente.] Um adversário pode tentar abrir sessão fingindo ser um hospital ou investigador legítimo, ou submeter mensagens em nome de uma identidade que não controla. \emph{Mitigação.} Cada cliente assina, com a sua chave long-term ECDSA P-256, uma representação canónica que liga o domínio (\texttt{SAHC-attest-v1}), o nonce e a chave pública efémera, verificada pelo enclave antes da admissão.
-  \item[A6, escalada de role.] Um cliente investigador admitido pode tentar emitir uma mensagem \texttt{MSG\_UPLOAD}, restrita ao role hospital. \emph{Mitigação.} O role é fixado no \texttt{KEY\_ACK} a partir do ficheiro de identidades autorizadas, e o trusted core verifica-o antes de qualquer decifragem aplicacional, devolvendo \texttt{E\_UNAUTHORIZED} sem inspecionar o conteúdo (secção~5.4).
-  \item[A7, admissão de identidade não autorizada.] O adversário pode tentar inserir uma chave pública adversarial no ficheiro de identidades autorizadas, ou forjar uma approval de hospital. \emph{Mitigação.} Quorum de $M=2$ assinaturas válidas de hospitais já reconhecidos sobre uma representação canónica do investigador, com prefixo de domínio distinto do handshake, validado pelo enclave no carregamento (secção~4.3).
-  \item[A8, inferência por agregados.] Um cliente legítimo pode emitir queries cujo conjunto correspondente é tão pequeno que o agregado revela um indivíduo. \emph{Mitigação.} Limiar de k-anonymity com $k=5$ aplicado no trusted core, com fail-closed sem exposição parcial do agregado quando o limiar não é satisfeito (secção~7.5).
-  \item[A9, leitura ou troca do estado persistido.] O adversário pode copiar o blob sealed e tentar desselá-lo numa máquina diferente, ou substituí-lo pelo blob de um enclave alternativo. \emph{Mitigação.} Sealing com key policy MRENCLAVE-bound, o que vincula a chave de unsealing à medição exata do enclave em execução e à plataforma física, satisfazendo RS9 (secção~7.4).
+  \item[A1, leitura de memória do processo servidor.] Um operador com privilégios de root no host pode invocar \texttt{ptrace}, ler \texttt{/proc/<pid>/mem} ou anexar um debugger.
+
+  \textbf{Mitigação.} Os registos clínicos e as chaves de sessão residem exclusivamente em páginas EPC, cifradas e autenticadas pelo processador. Qualquer leitura fora do enclave devolve apenas ciphertext sem utilidade.
+  \item[A2, manipulação de tráfego de rede.] Um adversário em posição de man-in-the-middle pode intercetar, modificar, reordenar ou repetir mensagens entre cliente e servidor.
+
+  \textbf{Mitigação.} Canal AEAD com AES-128-GCM, sequence numbers monotónicos por sentido e tipo da mensagem coberto pela AAD, descritos na secção~5.3.
+  \item[A3, impersonação de enclave.] Um adversário pode tentar substituir o enclave legítimo por código arbitrário em user-space, ou fazer downgrade de uma execução em hardware para simulação.
+
+  \textbf{Mitigação.} Atestação remota com quote DCAP no caminho HW, MRENCLAVE pinned a partir do binário assinado, recusa explícita de quotes SAHC quando o cliente exige DCAP (secção~6.4).
+  \item[A4, replay ou substituição do quote.] O adversário pode tentar reutilizar um quote produzido para uma sessão anterior, ou intercalar a sua própria chave pública efémera no \texttt{ATTEST\_RESP}.
+
+  \textbf{Mitigação.} O \texttt{report\_data} do quote carrega \texttt{SHA-256(nonce $\|$ enclave\_ecdh\_pub)}, o que vincula o quote ao nonce escolhido pelo cliente e à chave efémera do enclave, descrito na secção~5.2.
+  \item[A5, impersonação de cliente.] Um adversário pode tentar abrir sessão fingindo ser um hospital ou investigador legítimo, ou submeter mensagens em nome de uma identidade que não controla.
+
+  \textbf{Mitigação.} Cada cliente assina, com a sua chave long-term ECDSA P-256, uma representação canónica que liga o domínio (\texttt{SAHC-attest-v1}), o nonce e a chave pública efémera, verificada pelo enclave antes da admissão.
+  \item[A6, escalada de role.] Um cliente investigador admitido pode tentar emitir uma mensagem \texttt{MSG\_UPLOAD}, restrita ao role hospital.
+
+  \textbf{Mitigação.} O role é fixado no \texttt{KEY\_ACK} a partir do ficheiro de identidades autorizadas, e o trusted core verifica-o antes de qualquer decifragem aplicacional, devolvendo \texttt{E\_UNAUTHORIZED} sem inspecionar o conteúdo (secção~5.4).
+  \item[A7, admissão de identidade não autorizada.] O adversário pode tentar inserir uma chave pública adversarial no ficheiro de identidades autorizadas, ou forjar uma approval de hospital.
+
+  \textbf{Mitigação.} Quorum de $M=2$ assinaturas válidas de hospitais já reconhecidos sobre uma representação canónica do investigador, com prefixo de domínio distinto do handshake, validado pelo enclave no carregamento (secção~4.3).
+  \item[A8, inferência por agregados.] Um cliente legítimo pode emitir queries cujo conjunto correspondente é tão pequeno que o agregado revela um indivíduo.
+
+  \textbf{Mitigação.} Limiar de k-anonymity com $k=5$ aplicado no trusted core, com fail-closed sem exposição parcial do agregado quando o limiar não é satisfeito (secção~7.5).
+  \item[A9, leitura ou troca do estado persistido.] O adversário pode copiar o blob sealed e tentar desselá-lo numa máquina diferente, ou substituí-lo pelo blob de um enclave alternativo.
+
+  \textbf{Mitigação.} Sealing com key policy MRENCLAVE-bound, o que vincula a chave de unsealing à medição exata do enclave em execução e à plataforma física, satisfazendo RS9 (secção~7.4).
 \end{description}
 
 \paragraph{Ataques fora do escopo.}
