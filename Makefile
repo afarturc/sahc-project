@@ -145,7 +145,14 @@ enclave.so: Enclave/Enclave.o Enclave/Enclave_t.o $(Enclave_Logic_Obj)
 	g++ Enclave/Enclave.o Enclave/Enclave_t.o $(Enclave_Logic_Obj) \
 		-o enclave.so -shared $(Enclave_Link_Flags)
 
-enclave.signed.so: enclave.so
+# Enclave signing key. Not tracked: generated locally on first build.
+# It only determines MRSIGNER, which no verifier in this project pins
+# (the client pins MRENCLAVE, regenerated per build by
+# scripts/extract_mrenclave.sh), so a per-developer key is harmless.
+Enclave/Enclave_private.pem:
+	openssl genrsa -3 -out $@ 3072
+
+enclave.signed.so: enclave.so Enclave/Enclave_private.pem
 	$(SGX_SDK)/bin/x64/sgx_sign sign -key Enclave/Enclave_private.pem \
 		-enclave enclave.so -out enclave.signed.so \
 		-config Enclave/Enclave.config.xml

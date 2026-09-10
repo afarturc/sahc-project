@@ -1,142 +1,249 @@
-# SAHC — Secure Aggregation for Healthcare Consortiums
+# SAHC: a confidential data lake for multi-hospital analytics on Intel SGX
 
-Data lake confidencial baseado em **Intel SGX** para análise colaborativa de dados de pacientes entre múltiplos hospitais. Hospitais e investigadores estabelecem sessões autenticadas com um servidor que aloja um enclave SGX; o enclave armazena os registos em memória protegida e responde a queries agregadas (AVG, MIN, MAX, COUNT) sem nunca expor registos individuais ao host, ao OS, nem ao operador cloud.
+A client/server system where several hospitals upload encrypted patient records to a
+server they do not trust, and researchers run aggregate queries (AVG, MIN, MAX, COUNT)
+over the combined dataset. Records are decrypted only inside an Intel SGX enclave. The
+host OS, the hypervisor and the cloud operator never see a plaintext record.
 
-Desenvolvido no âmbito da disciplina **Segurança e Aplicações de Hardware Confiável (SAHC)**, FCUP — Universidade do Porto, 2025/26.
+Built in C/C++ on the Intel SGX SDK and Gramine 1.9, with an embedded DuckDB query
+engine and real Intel DCAP remote attestation. Validated end to end on Intel SGX2
+hardware (Azure `Standard_DC2s_v3`, Xeon Platinum 8370C).
 
-## Estado Atual
+Course project for *Segurança e Aplicações de Hardware Confiável*, MSc in Information
+Security, Faculdade de Ciências da Universidade do Porto, 2025/26.
+By **Artur Correia**, **Gonçalo Sousa** and **Tiago Pinheiro**.
 
-- **Milestone 1 (Fase 1)** — protótipo single-process entregue. Tag `v1.0-milestone1` preserva esse estado.
-- **Milestone 2 (Fases 2–4)** — fechado em SIM. Implementado: cliente/servidor TCP concorrente (pthread por conexão, `MAX_SESSIONS=8`), identidades ECDSA P-256 com admissão por quórum, handshake atestação + ECDH P-256 + HKDF-SHA256, canal AEAD AES-128-GCM com sequence numbers, enforcement de roles (HOSPITAL/RESEARCHER), k-anonymity (k=5), sealing MRENCLAVE-bound, REPL, MRENCLAVE pinning auto-gerado de `sgx_sign dump`, **migração para Gramine 1.9 + DuckDB v1.1.3** (variante `gramine_server`), **atestação DCAP real** (`SAHC_HW=1`: servidor lê `/dev/attestation/quote`, cliente chama `sgx_qv_verify_quote()`).
-- **Validação em hardware Intel**: executada em Azure `Standard_DC2s_v3` (Xeon Platinum 8370C, Ice Lake-SP, SGX2 + FLC). Caminho DCAP fim-a-fim a passar; testes negativos (downgrade, MRENCLAVE pin, anti-downgrade do cliente) e persistência cross-restart validados. Runbook de provisão em [`docs/AZURE_SETUP.md`](docs/AZURE_SETUP.md); plano de testes em [`docs/HW.md`](docs/HW.md); benchmarks em `bench-hw.md` (não trackeado, comparado com `bench-sim.md`).
+## The problem
 
-Os artefactos da Milestone 1 (relatório, slides, guião, diagramas drawio) estão em [`docs/milestone1/`](docs/milestone1/).
+A consortium of hospitals wants to compute statistics over their pooled patient records:
+disease prevalence, average lab values, correlations across institutions. Each hospital
+is legally and ethically barred from handing raw records to the others, and none of them
+wants to trust the cloud provider hosting the pool.
 
-## Arquitetura
+The question this project answers: **can you place the aggregation inside a hardware
+enclave, prove to each participant that the code holding their records is the code they
+audited, and still get usable performance?**
 
-Modelo split-trust com dois caminhos de servidor que partilham o
-cliente e o protocolo. O trusted core (`EnclaveLogic/`) é neutro de
-backend e compila para os dois lados:
+The adversary is the cloud operator. It has root on the host, controls the hypervisor and
+the filesystem, can read and rewrite process memory and network traffic, can restart the
+server at will, and can present itself as a legitimate hospital or researcher. Everything
+outside the enclave boundary is hostile.
 
-- **`sgx_server`** — caminho SGX-SDK clássico, com enclave
-  `enclave.signed.so` carregado via ECALLs. Motor de query artesanal.
-- **`gramine_server`** — caminho Gramine LibOS, mesma `EnclaveLogic`
-  linkada com OpenSSL + Gramine pseudofiles. Motor de query DuckDB
-  (SQL real). Atestação DCAP real quando construído com `SAHC_HW=1`.
+## Results
 
-O canal cliente↔trusted-core passa fisicamente pelo servidor mas é
-cifrado fim-a-fim com a chave de sessão derivada por ECDH.
+Measured on Azure `Standard_DC2s_v3` (2 vCPU Xeon Platinum 8370C, Ice Lake-SP, SGX2 with
+Flexible Launch Control), client and server on loopback to isolate the enclave overhead
+from the network. SIM is the SGX SDK simulation path with the hand-rolled query engine;
+HW is Gramine on real SGX hardware with full DCAP attestation and DuckDB.
 
-```
-┌──────────────────┐    TCP frames    ┌───────────────────────────────┐
-│  sgx_client      │ ←──────────────→ │  Server (untrusted host)      │
-│  ECDSA identity  │   AES-128-GCM    │  ┌──────────────────────────┐ │
-│  ECDH ephemeral  │   (after KEX)    │  │  Trusted core            │ │
-│  Quote verifier  │                  │  │  ─ SDK enclave (sgx_*)   │ │
-│  CSV loader      │                  │  │  ─ ou Gramine LibOS      │ │
-│  Query REPL      │                  │  │    + DuckDB              │ │
-└──────────────────┘                  │  │  • parties + records     │ │
-                                      │  │  • session keys          │ │
-                                      │  │  • AEAD decrypt + agg.   │ │
-                                      │  │  • seal/unseal           │ │
-                                      │  └──────────────────────────┘ │
-                                      │  data/sealed/state.bin ←──┘  │
-                                      └───────────────────────────────┘
-```
+**Session handshake** (socket open to `KEY_ACK` accepted, 50 iterations):
 
-### Fluxo de uma sessão
+| Metric | SIM (ms) | HW (ms) | Ratio |
+|---|---:|---:|---:|
+| mean | 3.20 | 32.15 | 10.0x |
+| p50 | 3.10 | 31.56 | 10.2x |
+| p95 | 3.66 | 33.55 | 9.2x |
+| p99 | 8.19 | 62.24 | 7.6x |
 
-1. **Bootstrap (servidor)**: carrega `enclave.signed.so`; tenta `unseal` de `data/sealed/state.bin`; se não existir, lê `authorized_parties.json`, valida o quórum dos investigadores e faz `seal` inicial.
-2. **Conexão TCP** do cliente para `127.0.0.1:7878`.
-3. **`ATTEST_REQ`** (C→S): `party_id || nonce(16) || client_ecdh_pub(64) || ECDSA_sig(64)`. A assinatura cobre `"SAHC-attest-v1" || nonce || client_ecdh_pub` com a chave long-term do cliente.
-4. **`ATTEST_RESP`** (S→C): `quote_format(1) || body`. Em SIM o body é o quote artesanal (MRENCLAVE, MRSIGNER, ISV ids, `user_data = SHA256(nonce || enclave_ecdh_pub)`, ECDSA do quote, QE identity, `enclave_ecdh_pub`); em build HW (`SAHC_HW=1`) o body é `enclave_ecdh_pub || quote_len || sgx_quote3_t` real lido de `/dev/attestation/quote`. Cliente despacha por format byte: SIM valida binding + MRENCLAVE pin; HW chama `sgx_qv_verify_quote()` antes do mesmo binding + pin.
-5. **HKDF**: `PRK = HMAC-SHA256("SAHC-v1", ECDH_shared)`; expande para `session_key (16 B AES-128)` e `iv_prefix (4 B)`.
-6. **`KEY_CONFIRM`** (C→S): `HMAC-SHA256(session_key, "confirm")`. O enclave valida, atribui o role do `party_id` e responde **`KEY_ACK`** com `status || role`.
-7. **Frames AEAD** a partir daqui: `[type | len | seq(8) | iv(12) | ciphertext | tag(16)]`, `iv = iv_prefix || seq`. AAD = cabeçalho. `seq` separado por sentido, monotónico.
-8. **`UPLOAD`** (HOSPITAL apenas): vetor de `PatientRecord` cifrados. O enclave desencripta, agrega ao store, e o servidor faz `seal` antes de responder **`UPLOAD_ACK`**.
-9. **`QUERY_REQ`** (qualquer role): `field || op || filter_diag`. O enclave executa a agregação; se `matched < K_ANON_THRESHOLD` (5), responde `E_INSUFFICIENT_RECORDS`. Caso contrário **`QUERY_RESP`** com `result || matched || applied_k`.
-10. **`SESSION_CLOSE`**: cliente fecha; o enclave liberta o `SessionContext`.
+**Upload throughput** by batch size (5 uploads per size, one open session):
 
-### Modelo de identidades
+| Batch | SIM mean (ms) | SIM rec/s | HW mean (ms) | HW rec/s |
+|---:|---:|---:|---:|---:|
+| 1 | 3.29 | 304 | 5.41 | 185 |
+| 5 | 3.47 | 1440 | 5.67 | 882 |
+| 25 | 2.89 | 8650 | 6.02 | 4152 |
+| 100 | 2.72 | 36738 | 6.02 | 16615 |
 
-`authorized_parties.json` define os participantes:
+**Query latency** by aggregation (20 iterations):
 
-- **Hospitais** (founders) entram diretamente, com `id` e `pubkey` (P-256 hex 64 B).
-- **Investigadores** só são aceites se reunirem `M=2` assinaturas válidas de hospitais sobre `SHA256("SAHC-approve-v1" || researcher_id || researcher_pubkey)`.
+| Query | SIM p50 (ms) | HW p50 (ms) | matched |
+|---|---:|---:|---:|
+| AVG age, no filter | 0.22 | 5.77 | 655 |
+| MIN temperature | 0.09 | 5.73 | 655 |
+| MAX blood sugar, diabetes | 0.08 | 5.85 | 170 |
+| COUNT age, hypertension | 0.09 | 5.81 | 148 |
+| AVG blood sugar | 0.09 | 5.76 | 655 |
 
-Roles atribuídos pelo enclave no `KEY_ACK`:
+## Findings
 
-| Role | Upload | Query | k-anon |
+- **The 26x query slowdown is not SGX, it is the engine.** The SIM path walks the record
+  array once with no dynamic allocation; the HW path pays DuckDB table creation, SQL
+  parsing and planning on every query. The absolute cost stays around 6 ms, which is fine
+  for interactive use, and real SQL expressiveness is worth it. Attributing this gap to
+  enclave overhead would have been the easy wrong conclusion.
+
+- **Attestation cost is a one-off, not a tax on throughput.** The roughly 29 ms of extra
+  handshake latency is dominated by the round trip to Intel's Quoting Enclave through
+  AESM and by collateral validation in `sgx_qv_verify_quote`. It is paid once per session
+  and amortizes to nothing over a working session.
+
+- **Intel's Quote Verification Library does not check what you probably care about most.**
+  The QvL validates the signature chain, the PCK certificates, the QE identity and the TCB
+  level, but the binding between the client's nonce and the enclave's ephemeral ECDH key
+  is an application-level property. It has to be recomputed and compared explicitly in the
+  client, or you have a verified quote with no freshness guarantee. This is the kind of
+  gap that makes an attestation implementation look correct while being replayable.
+
+- **Both adversarial tests failed exactly where they should, and no earlier.** Forcing a
+  hardware-to-simulation downgrade aborts in the signature-chain stage before any session
+  key exists; forcing an MRENCLAVE mismatch passes the DCAP chain and the report binding,
+  then aborts in the identity-pinning stage. The three verifier stages are genuinely
+  independent, each able to kill the session on its own.
+
+- **The LibOS is what keeps the trusted core portable.** On Gramine, quote production is
+  entirely pseudo-file I/O (`/dev/attestation/user_report_data`, `/dev/attestation/quote`),
+  so `EnclaveLogic/` needs no attestation code at all and compiles unchanged against both
+  the SGX SDK and Gramine backends.
+
+Honest divergence from the design: the plan specified AES-256-GCM and the implementation
+uses AES-128-GCM, matching the single HKDF expansion and the `sgx_rijndael128GCM`
+parameter on the SDK path. 128-bit symmetric security is sufficient under the stated
+adversary model, and the report says so rather than quietly shipping the change.
+
+## How it works
+
+![Architecture](report/pictures/architecture.png)
+
+Split-trust, with two server paths sharing one client and one protocol. The trusted core
+in `EnclaveLogic/` is backend-neutral and compiles into both:
+
+- **`sgx_server`**: classic SGX SDK path, `enclave.signed.so` loaded over ECALLs, with
+  the hand-rolled query engine. Development path.
+- **`gramine_server`**: Gramine LibOS path, the same `EnclaveLogic/` linked against
+  OpenSSL and Gramine pseudo-files, with DuckDB for real SQL, and real DCAP attestation
+  under `SAHC_HW=1`. Production path.
+
+The client-to-enclave channel passes physically through the untrusted server but is
+encrypted end to end under a key neither the server nor the operator can derive.
+
+**A session, step by step:**
+
+1. Server boots, tries to unseal `data/sealed/state.bin`. On a miss it loads
+   `authorized_parties.json`, validates the researcher quorum, and seals the initial state.
+2. `ATTEST_REQ` (client to server): `party_id || nonce(16) || client_ecdh_pub(64) ||
+   ECDSA_sig(64)`, the signature covering `"SAHC-attest-v1" || nonce || client_ecdh_pub`
+   under the client's long-term key. This authenticates the client.
+3. `ATTEST_RESP` (server to client): a format byte, then the quote. In HW the server
+   writes `SHA-256(nonce || enclave_ecdh_pub)` into
+   `/dev/attestation/user_report_data` and returns the real `sgx_quote3_t` from
+   `/dev/attestation/quote`. This authenticates the enclave *and* binds it to this
+   session's ephemeral key.
+4. Client verification, four independent stages: structural parse, signature chain
+   (`sgx_qv_verify_quote`, accepting `OK`, `CONFIG_NEEDED` and `SW_HARDENING_NEEDED`,
+   rejecting `REVOKED` and `OUT_OF_DATE`), report binding, MRENCLAVE pin.
+5. `HKDF`: `PRK = HMAC-SHA256("SAHC-v1", ECDH_shared)`, expanded to a 16-byte AES-128
+   session key and a 4-byte IV prefix.
+6. `KEY_CONFIRM` / `KEY_ACK`: the enclave verifies the confirmation MAC and assigns the
+   role registered for that `party_id`.
+7. Every frame from here is AEAD: `[type | len | seq(8) | iv(12) | ciphertext | tag(16)]`,
+   `iv = iv_prefix || seq`, header as AAD, a monotonic sequence number per direction.
+   Any replay, sequence mismatch or bad tag closes the session.
+8. `UPLOAD` (hospitals only), then `QUERY_REQ` (any role). If a query matches fewer than
+   `K_ANON_THRESHOLD` (5) records the enclave returns `E_INSUFFICIENT_RECORDS` with no
+   aggregate and no count, so adaptive queries cannot narrow in on an individual.
+
+**Identity and admission.** Every participant holds an ECDSA P-256 long-term keypair.
+Hospitals are founders, registered directly in `authorized_parties.json`. Researchers are
+admitted only on quorum: at least `M=2` valid hospital signatures over
+`SHA256("SAHC-approve-v1" || researcher_id || researcher_pubkey)`, re-validated by the
+enclave on every load. This moves admission from a single administrator to the consortium.
+
+| Role | Upload | Query | k-anonymity |
 |---|---|---|---|
-| `HOSPITAL` | sim | sim | 5 |
-| `RESEARCHER` | não | sim | 5 |
+| `HOSPITAL` | yes | yes | 5 |
+| `RESEARCHER` | no | yes | 5 |
 
-Identidades vivem em `parties/<id>.{key,pub}` (PEM), gerados por `scripts/gen_identity.py`. O ficheiro `authorized_parties.json` é montado por `scripts/build_authorized_parties.py`.
+**Persistence.** State is sealed with the key policy pinned to MRENCLAVE, so an operator
+who swaps in a modified enclave binary cannot unseal blobs written by the original, even
+with full filesystem access. Records and identities survive a server restart; clients
+reconnect and re-attest transparently.
 
-## Estrutura do Repositório
+## Repository layout
 
 ```
-Server/                 # caminho SGX-SDK: TCP + dispatcher + enclave host
-  server_main.cpp       # accept loop, sealing I/O, handlers por message type
-  parties_loader.cpp/h  # parsing JSON, validação de quórum
-Gramine/                # caminho Gramine LibOS
-  server_main.cpp       # mesmo dispatcher, sem ECALL boundary
-  server.manifest.template  # Jinja: dev (gramine-direct) e HW (gramine-sgx)
-EnclaveLogic/           # trusted core neutro de backend (SDK ou Gramine)
-  enclave_logic.cpp     # attest_begin, key_confirm, upload, query, seal
-  crypto_backend_*.cpp  # sgx_tcrypto (SDK) ou OpenSSL (Gramine)
-  identity_backend_*.cpp# sgx self-report ou /dev/attestation pseudofiles
-  seal_backend_*.cpp    # sgx_seal_data_ex ou Gramine MRENCLAVE-bound key
-  query_engine_*.cpp    # artesanal (SDK) ou DuckDB (Gramine)
-Client/                 # cliente partilhado pelos dois caminhos
-  client_main.cpp       # ATTEST_REQ → KEY_CONFIRM → REPL/single-shot
-  session.cpp           # ClientSession API (reutilizada pelo bench)
-  quote_verify.cpp      # dispatcher SAHC vs DCAP (sgx_qv_verify_quote em HW)
-  identity.cpp          # ECDSA P-256 (load PEM, sign, verify)
-  secure_frame.cpp      # AES-128-GCM AEAD, sequence numbers
-  csv_loader.cpp        # parsing dos CSVs por hospital
-Bench/                  # bench.cpp — handshake, upload throughput, query lat.
-Common/                 # framing, tcp_util, cJSON (host-side, partilhado)
-Enclave/                # SDK enclave (Enclave.{cpp,edl,config.xml})
-Include/                # patient.h, protocol.h, party.h
-scripts/                # gen_identity.py, build_authorized_parties.py,
-                        # extract_mrenclave.sh, fetch_duckdb.sh
-data/                   # CSVs por hospital + sealed/state.bin (gitignored)
-parties/                # chaves long-term .key/.pub (gitignored)
-authorized_parties.json # registo público de identidades autorizadas
-docs/                   # RUNNING.md, HW.md, AZURE_SETUP.md,
-                        # project_description.md, diagrams/,
-                        # milestone1/, refs/
-PLANO_FINAL.md          # plano de Milestone 2 (Fases 2-4 fechadas)
+EnclaveLogic/           trusted core, backend-neutral (SDK or Gramine)
+  enclave_logic.cpp     attest_begin, key_confirm, upload, query, seal
+  crypto_backend_*.cpp  sgx_tcrypto (SDK) or OpenSSL (Gramine)
+  identity_backend_*.cpp  sgx self-report or /dev/attestation pseudo-files
+  seal_backend_*.cpp    sgx_seal_data_ex or Gramine MRENCLAVE-bound key
+  query_engine_*.cpp    hand-rolled single pass (SDK) or DuckDB (Gramine)
+Client/                 one client, shared by both server paths
+  session.cpp           ClientSession API, reused by the benchmark harness
+  quote_verify.cpp      the four-stage verifier, SAHC stub vs real DCAP
+  identity.cpp          ECDSA P-256 load/sign/verify
+  secure_frame.cpp      AES-128-GCM AEAD with sequence numbers
+Server/                 SGX SDK path: accept loop, dispatcher, enclave host
+Gramine/                Gramine path: same dispatcher, no ECALL boundary
+  server.manifest.template  Jinja, both gramine-direct and gramine-sgx
+Enclave/                SDK enclave: Enclave.{cpp,edl,config.xml}
+Bench/                  handshake latency, upload throughput, query latency
+Include/                patient.h, protocol.h, party.h
+report/                 final report, LaTeX sources and PDF (Portuguese)
+docs/                   RUNNING.md, HW.md, AZURE_SETUP.md, diagrams, M1 artifacts
+scripts/                identity generation, MRENCLAVE extraction, DuckDB fetch
 ```
 
-## Como correr
+The full write-up, including the adversary model, the security-property analysis and the
+requirement-to-test mapping, is **`report/main.pdf`** (in Portuguese).
 
-Guia operacional completo (pré-requisitos, build, run, troubleshooting)
-em **[`docs/RUNNING.md`](docs/RUNNING.md)** — ponto único de entrada
-para SIM mode (desenvolvimento local).
+## Running it
 
-Para correr em hardware Intel real: [`docs/HW.md`](docs/HW.md). Para
-provisionar uma VM SGX no Azure do zero (recomendado: `Standard_DC2s_v3`,
-Ice Lake-SP), seguir [`docs/AZURE_SETUP.md`](docs/AZURE_SETUP.md).
+Full operational guide in **[`docs/RUNNING.md`](docs/RUNNING.md)** for simulation mode,
+**[`docs/HW.md`](docs/HW.md)** for real Intel hardware, and
+**[`docs/AZURE_SETUP.md`](docs/AZURE_SETUP.md)** to provision an SGX VM from scratch.
 
-## Limitações Conhecidas
+Simulation mode needs no SGX hardware:
 
-- **DCAP real só no caminho Gramine**. O `sgx_server` (SGX-SDK) emite o quote artesanal SAHC mesmo em build HW; passar a DCAP real exigiria `sgx_qe_get_quote()` dentro do enclave — fora do escopo. O caminho de produção é o `gramine_server` com `SAHC_HW=1`.
-- **Sem mitigação de side-channels app-level**. Loop de query e parser DuckDB têm padrões de acesso data-dependent. Ataques de cache/page-fault/branch-timing podem inferir parcialmente o conteúdo dos registos. As contramedidas (oblivious primitives, ORAM) ficaram fora do escopo.
-- **Sem cap de conexões simultâneas no servidor**: a 9ª sessão concorrente apanha `E_INTERNAL` (slot exhaustion) — comportamento correcto mas não elegante.
-- **Sem revogação dinâmica**: para remover uma party é preciso editar o JSON e remover `data/sealed/state.bin` para forçar reload.
-- **Sealed blob não migra entre backends**. Trocar SGX-SDK ↔ Gramine ou SIM ↔ HW invalida `data/sealed/state.bin` (sealing keys diferentes).
+```bash
+source /opt/intel/sgxsdk/environment
+
+./scripts/fetch_duckdb.sh                      # not tracked, ~57 MB
+for p in hosp-santa-maria hosp-sao-joao hosp-santo-antonio fcup-research; do
+    python3 scripts/gen_identity.py "$p"       # writes parties/<id>.{key,pub}
+done
+python3 scripts/build_authorized_parties.py
+
+make gramine_server gramine_manifest           # or: make sgx_server sgx_client
+```
+
+Not tracked, generated on first build or by the scripts above: the enclave signing key
+(`Enclave/Enclave_private.pem`, created by the Makefile), the DuckDB amalgamation, the
+per-party long-term keys, the sealed state under `data/sealed/`, and the benchmark output.
+The tracked CSVs in `data/` are small synthetic samples; the benchmark harness generates
+its own record sets.
+
+## Known limitations
+
+- **Real DCAP only on the Gramine path.** `sgx_server` emits the SAHC stub quote even in a
+  HW build. Moving it to real DCAP would need `sgx_qe_get_quote()` inside the enclave. The
+  production path is `gramine_server` with `SAHC_HW=1`.
+- **No application-level side-channel mitigation.** The query loop and the DuckDB parser
+  have data-dependent access patterns, so cache, page-fault and branch-timing attacks can
+  partially infer record content. Oblivious primitives and ORAM were out of scope.
+- **No rollback protection.** The enclave accepts any syntactically valid blob produced by
+  its own MRENCLAVE, so an operator can restore an old sealed state. The fix is a
+  monotonic counter in the sealing AAD.
+- **No dynamic revocation.** Removing a party means editing the JSON and deleting
+  `data/sealed/state.bin` to force a reload.
+- **Connection cap is unhandled.** The server holds 8 concurrent sessions; the 9th gets a
+  generic `E_INTERNAL` instead of a meaningful error.
+- **No handshake rate limiting**, which makes flooding the attestation channel a trivial
+  denial of service.
+- **Sealed blobs do not migrate.** Switching SGX SDK to Gramine, or SIM to HW, invalidates
+  `data/sealed/state.bin`, by design rather than by accident.
 
 ## Stack
 
-| Componente | Tecnologia |
+| Component | Technology |
 |---|---|
-| Linguagem | C/C++ |
-| Crypto trusted | `sgx_tcrypto` (caminho SDK) ou OpenSSL (caminho Gramine) — AES-128-GCM, ECDSA P-256, ECDH, HMAC-SHA256, sealing |
-| Query engine | Artesanal (SDK) ou DuckDB v1.1.3 com SQL allowlist (Gramine) |
-| LibOS | Gramine 1.9 (caminho `gramine_server`) |
-| Crypto untrusted (cliente) | OpenSSL 1.1+ (EC, EVP, AES-128-GCM, HMAC) |
-| Atestação | Intel DCAP (real no caminho Gramine sob `SAHC_HW=1`; SAHC artesanal em SIM e no caminho SDK) |
-| Transporte | TCP cru + framing próprio (header 5 B, AEAD pós-KEX) |
+| Language | C/C++ |
+| Trusted crypto | `sgx_tcrypto` (SDK) or OpenSSL (Gramine): AES-128-GCM, ECDSA P-256, ECDH, HMAC-SHA256, sealing |
+| Query engine | Hand-rolled single pass (SDK) or DuckDB v1.1.3 with a SQL allowlist (Gramine) |
+| LibOS | Gramine 1.9 |
+| Attestation | Intel DCAP, real on the Gramine path under `SAHC_HW=1` |
+| Transport | Raw TCP with a 5-byte header, AEAD frames after key exchange |
 | Build | GNU Make, `sgx_edger8r`, `sgx_sign` |
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).

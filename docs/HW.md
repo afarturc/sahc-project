@@ -201,9 +201,10 @@ Quando um teste falha, recolher:
 
 ## 8. Tolerância a falhas
 
-Ver §10 de [`PLANO_FINAL.md`](../PLANO_FINAL.md) — cobre recuperação
-de queda (sealed state + restart), rotação de chaves comprometidas,
-comportamento sob TCP timeout, decrypt failure, k-anon insuficiente.
+Ver a secção "Tolerância a falhas" do relatório final
+([`../report/main.pdf`](../report/main.pdf)): cobre recuperação de queda
+(sealed state + restart), rotação de chaves comprometidas, comportamento
+sob TCP timeout, decrypt failure e k-anon insuficiente.
 
 ## 9. Troubleshooting
 

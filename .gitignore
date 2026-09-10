@@ -47,3 +47,15 @@ EnclaveLogic/*.o
 sahc_smoke
 gramine_server
 *.gramine.o
+
+# Enclave signing key: generated on first build by the Makefile, never
+# tracked. Regenerating it changes MRSIGNER, which nothing pins (the
+# client pins MRENCLAVE, regenerated per build by scripts/extract_*.sh).
+Enclave/Enclave_private.pem
+
+# Local-only working material, deliberately untracked
+CLAUDE.md
+PLANO_FINAL.md
+docs/project_description.md
+docs/refs/
+docs/milestone1/*.md
